@@ -148,13 +148,20 @@ def classify_linkedin_state(url: str, title: str = "", visible_text: str = "") -
     text = " ".join([title or "", visible_text or ""])
     lowered = text.lower()
     url_lower = (url or "").lower()
+    logged_out_markers = [
+        "sign in as ",
+        "join now",
+        "new to linkedin?",
+        "email or phone",
+        "agree & join",
+    ]
+    if "/login" in url_lower or any(marker in lowered for marker in logged_out_markers):
+        return _state(LOGIN_REQUIRED, "linkedin_login_screen", "Use attended VNC login with linkedin-profile.", True)
     if "/feed" in url_lower or "start a post" in lowered or ("messaging" in lowered and "notifications" in lowered and "home" in lowered):
         return _state(AUTHENTICATED, "linkedin_feed_markers_visible", "Saved LinkedIn profile appears authenticated.")
     challenge = _challenge_reason(text, url)
     if challenge:
         return _state(MFA_OR_CHALLENGE_REQUIRED, challenge, "Stop and request attended LinkedIn verification refresh.", True)
-    if "/login" in url_lower or "sign in" in lowered and "email or phone" in lowered:
-        return _state(LOGIN_REQUIRED, "linkedin_login_screen", "Use attended VNC login with linkedin-profile.", True)
     return _state(UNKNOWN, "linkedin_state_unrecognized", "Review the browser state manually before using this profile.", True)
 
 

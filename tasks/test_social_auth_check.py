@@ -86,6 +86,16 @@ def test_classify_linkedin_login_required():
     assert state["status"] == auth.LOGIN_REQUIRED
 
 
+def test_classify_linkedin_feed_with_signin_as_not_authenticated():
+    state = auth.classify_linkedin_state(
+        "https://www.linkedin.com/feed/",
+        "LinkedIn",
+        "Discover new opportunities Sign in Join now Sign in as Marcus m*****@gmail.com",
+    )
+    assert state["status"] == auth.LOGIN_REQUIRED
+    assert state["reason"] == "linkedin_login_screen"
+
+
 def test_classify_linkedin_challenge():
     state = auth.classify_linkedin_state(
         "https://www.linkedin.com/checkpoint/challenge/",
