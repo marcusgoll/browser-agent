@@ -144,6 +144,26 @@ Approved execute is intentionally separate:
 
 Do not schedule the approved-execute wrapper. Use it only after reviewing the dry-run report and approving exact scope. X_BEARER_TOKEN is required only for approved move/delete execution and must stay in .env or the process environment, never committed.
 
+TikTok Saved/Favorites Processor
+--------------------------------
+
+The TikTok saved/favorites processor is a read-only v0 workflow for turning saved TikToks into local recipe, tip, digest, grocery, and run-summary artifacts under output/tiktok/.
+
+Attended login:
+   cd /home/orchestrator/browser-agent
+   docker compose -f docker-compose.vnc.yml up -d
+   docker exec -d browser-agent-vnc \
+     python3 /app/scripts/vnc_login_secure.py https://www.tiktok.com --profile tiktok-profile
+
+Use the VNC window to complete TikTok login manually. Do not put TikTok credentials in scripts, .env, or source files. Stop VNC when the profile is authenticated:
+   docker compose -f docker-compose.vnc.yml down
+
+Read-only run:
+   cd /home/orchestrator/browser-agent
+   docker compose run --rm browser-agent scripts/process_tiktok_saves.py --dry-run --max 50
+
+Safety: process_tiktok_saves.py has no execute mode and no mutation mode. It does not like, favorite, save, follow, comment, share, delete, message, shop, publish, or schedule anything. If TikTok requires login, it writes output/tiktok/run_summary.json with status requires_user and exits without attempting credential entry.
+
 Source Repo Sync
 ----------------
 

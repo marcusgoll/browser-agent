@@ -29,6 +29,7 @@ services:
       - ./output:/app/output:rw
       - ./scripts:/app/scripts:ro
       - ./tasks:/app/tasks:ro
+      - ./README.md:/app/README.md:ro
     networks:
       - browser-agent-network
       # Optionally attach to social-media-agent network to reach its Chrome
