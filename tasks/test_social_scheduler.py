@@ -133,10 +133,13 @@ def test_publish_due_linkedin_calls_exact_copy_publisher(monkeypatch, tmp_path):
     assert any("[PUBLISHED] LinkedIn-02" in message for message in messages)
 
 
-def test_publish_due_linkedin_blocks_on_publisher_block(monkeypatch):
+def test_publish_due_linkedin_blocks_on_publisher_block(monkeypatch, tmp_path):
     state = _due_linkedin_state()
+    stale_record = tmp_path / "LinkedIn-02.json"
+    stale_record.write_text('{"status":"published"}\n', encoding="utf-8")
     monkeypatch.setattr(scheduler, "readiness_preflight_blocked", lambda prefix="publish": None)
     monkeypatch.setattr(scheduler, "update_tracker_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scheduler, "published_record_path", lambda item_id: stale_record)
     monkeypatch.setattr(
         scheduler,
         "run_linkedin_publish",
@@ -148,7 +151,34 @@ def test_publish_due_linkedin_blocks_on_publisher_block(monkeypatch):
     item = state["items"]["LinkedIn-02"]
     assert item["status"] == "blocked"
     assert item["block_reason"] == "account_ambiguous"
+    assert not stale_record.exists()
     assert any("account_ambiguous" in message for message in messages)
+
+
+def test_run_linkedin_publish_ignores_stale_success_json(monkeypatch, tmp_path):
+    approved = tmp_path / "approved"
+    output = tmp_path / "output"
+    output.mkdir()
+    stale_json = output / "publish-linkedin-02.json"
+    stale_json.write_text(
+        json.dumps({"status": "published_or_submitted", "published_url": "https://www.linkedin.com/feed/"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scheduler, "APPROVED_OUT", approved)
+    monkeypatch.setattr(scheduler, "BROWSER_AGENT", tmp_path)
+
+    class Proc:
+        returncode = 2
+        stdout = ""
+        stderr = "blocked"
+
+    monkeypatch.setattr(scheduler.subprocess, "run", lambda *args, **kwargs: Proc())
+
+    result = scheduler.run_linkedin_publish("LinkedIn-02", _linkedin_drafts()["LinkedIn-02"])
+
+    assert result["ok"] is False
+    assert result["status"] == "error"
+    assert "did not write json" in result["reason"]
 
 
 def test_publish_due_linkedin_dry_run_does_not_call_publisher(monkeypatch):
