@@ -144,6 +144,16 @@ Approved execute is intentionally separate:
 
 Do not schedule the approved-execute wrapper. Use it only after reviewing the dry-run report and approving exact scope. X_BEARER_TOKEN is required only for approved move/delete execution and must stay in .env or the process environment, never committed.
 
+Source Repo Sync
+----------------
+
+Source repo to live sync:
+   cd /home/orchestrator/repos/local/browser-agent
+   scripts/sync_to_live.sh --dry-run
+   scripts/sync_to_live.sh --apply
+
+The sync helper excludes .env, profiles/, output/, caches, and runtime browser state. It refuses a dirty source tree unless --allow-dirty is passed.
+
 Canonical Tests
 ---------------
 Run tests inside Docker, not host Python:
