@@ -232,6 +232,53 @@ def test_publish_due_preserves_concurrent_success_record(monkeypatch, tmp_path):
     assert any("[PUBLISHED] LinkedIn-02" in message for message in messages)
 
 
+def test_apply_linkedin_url_backfill_updates_published_generic_url(monkeypatch, tmp_path):
+    state = {
+        "items": {
+            "LinkedIn-02": {
+                "status": "published",
+                "platform": "LinkedIn",
+                "published_url": "https://www.linkedin.com/feed/",
+                "content_warning": "preserve me",
+            }
+        }
+    }
+    record = tmp_path / "published-LinkedIn-02.json"
+    record.write_text(json.dumps({"status": "published", "published_url": "https://www.linkedin.com/feed/"}), encoding="utf-8")
+    monkeypatch.setattr(scheduler, "published_record_path", lambda item_id: record)
+
+    changed = scheduler.apply_linkedin_url_backfill(
+        state,
+        "LinkedIn-02",
+        "https://www.linkedin.com/feed/update/urn:li:activity:123456/",
+    )
+
+    assert changed is True
+    assert state["items"]["LinkedIn-02"]["published_url"] == "https://www.linkedin.com/feed/update/urn:li:activity:123456/"
+    assert state["items"]["LinkedIn-02"]["content_warning"] == "preserve me"
+    assert json.loads(record.read_text())["published_url"] == "https://www.linkedin.com/feed/update/urn:li:activity:123456/"
+
+
+def test_apply_linkedin_url_backfill_skips_unpublished_or_specific_url(monkeypatch, tmp_path):
+    state = {
+        "items": {
+            "Blocked": {"status": "blocked", "platform": "LinkedIn", "published_url": "https://www.linkedin.com/feed/"},
+            "Specific": {
+                "status": "published",
+                "platform": "LinkedIn",
+                "published_url": "https://www.linkedin.com/feed/update/urn:li:activity:old/",
+            },
+        }
+    }
+    record = tmp_path / "published.json"
+    record.write_text(json.dumps({"status": "published", "published_url": "https://www.linkedin.com/feed/update/urn:li:activity:old/"}), encoding="utf-8")
+    monkeypatch.setattr(scheduler, "published_record_path", lambda item_id: record)
+
+    assert scheduler.apply_linkedin_url_backfill(state, "Blocked", "https://www.linkedin.com/feed/update/urn:li:activity:new/") is False
+    assert scheduler.apply_linkedin_url_backfill(state, "Specific", "https://www.linkedin.com/feed/update/urn:li:activity:new/") is False
+    assert state["items"]["Specific"]["published_url"] == "https://www.linkedin.com/feed/update/urn:li:activity:old/"
+
+
 def test_publish_due_linkedin_dry_run_does_not_call_publisher(monkeypatch):
     state = _due_linkedin_state()
 
