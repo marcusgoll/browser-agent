@@ -76,6 +76,21 @@ def test_classify_lookup_page_blocks_login_or_join_surface():
     assert result["reason"] == "linkedin_not_authenticated"
 
 
+def test_select_unique_activity_url_accepts_analytics_activity_url():
+    result = backfill.select_unique_activity_url(
+        "One thing aviation teaches well: repeatability matters more than confidence.",
+        [
+            {
+                "text": "One thing aviation teaches well: repeatability matters more than confidence. A student can feel confident and still have a weak process.",
+                "url": "https://www.linkedin.com/analytics/post-summary/urn:li:activity:7464493294782320640/",
+            }
+        ],
+    )
+
+    assert result["ok"] is True
+    assert result["published_url"] == "https://www.linkedin.com/feed/update/urn:li:activity:7464493294782320640/"
+
+
 def test_select_unique_activity_url_blocks_zero_or_multiple_matches():
     assert backfill.select_unique_activity_url("missing", [])["status"] == "blocked"
 

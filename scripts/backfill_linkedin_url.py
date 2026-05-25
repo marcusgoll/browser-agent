@@ -7,9 +7,16 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from social_auth_check import build_launch_args, stealth_init_script
 
 PROFILE_DIR = os.environ.get("BROWSER_PROFILE_DIR", "/home/orchestrator/browser-agent/profiles")
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/home/orchestrator/browser-agent/output"))
@@ -50,10 +57,14 @@ def extract_packet_snippet(packet_path: Path, max_chars: int = 180) -> str:
 
 
 def sanitize_activity_url(url: str) -> str | None:
-    match = ACTIVITY_RE.search(url or "")
-    if not match:
-        return None
-    return match.group(0).rstrip("/") + "/"
+    raw = url or ""
+    match = ACTIVITY_RE.search(raw)
+    if match:
+        return match.group(0).rstrip("/") + "/"
+    analytics = re.search(r"/analytics/post-summary/(urn:li:activity:[^/]+)/?", raw)
+    if analytics:
+        return f"https://www.linkedin.com/feed/update/{analytics.group(1)}/"
+    return None
 
 
 def match_terms(snippet: str) -> list[str]:
@@ -101,7 +112,7 @@ async def collect_candidates(page: Any) -> list[dict[str, str]]:
         () => {
           const out = [];
           const seen = new Set();
-          const anchors = Array.from(document.querySelectorAll('a[href*="/feed/update/urn:li:activity:"]'));
+          const anchors = Array.from(document.querySelectorAll('a[href*="/feed/update/urn:li:activity:"], a[href*="/analytics/post-summary/urn:li:activity:"]'));
           for (const a of anchors) {
             const href = a.href;
             if (!href || seen.has(href)) continue;
@@ -142,11 +153,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         context = await p.chromium.launch_persistent_context(
             user_data_dir=str(profile_path),
             headless=args.headless,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=build_launch_args(),
         )
         try:
             page = context.pages[0] if context.pages else await context.new_page()
-            for url in ["https://www.linkedin.com/feed/", "https://www.linkedin.com/in/marcusgollahon/recent-activity/all/"]:
+            await page.add_init_script(stealth_init_script())
+            activity_url = args.activity_url.rstrip("/") + "/"
+            for url in ["https://www.linkedin.com/feed/", activity_url]:
                 await page.goto(url, wait_until="domcontentloaded", timeout=args.timeout * 1000)
                 await page.wait_for_timeout(3000)
                 visible = await page.locator("body").inner_text(timeout=5000)
@@ -170,6 +183,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--item-id", required=True)
     parser.add_argument("--packet", required=True)
     parser.add_argument("--profile", default="linkedin-profile")
+    parser.add_argument("--activity-url", default="https://www.linkedin.com/in/marcusgoll/recent-activity/all/", help="LinkedIn recent activity URL to scan after the feed")
     parser.add_argument("--timeout", type=int, default=45)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-browser", action="store_true", help="Only parse packet; do not open LinkedIn")
