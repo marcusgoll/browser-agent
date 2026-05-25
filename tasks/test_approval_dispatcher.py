@@ -141,6 +141,39 @@ def test_render_card_is_short_and_explicit():
     assert "approve x-001" in card
 
 
+def test_render_card_includes_voice_warnings():
+    item = {
+        "item_id": "x-001",
+        "platform": "X",
+        "type": "post",
+        "goal": "Review and approve exact content.",
+        "risk": "low",
+        "copy": "Three things I would check before blaming the model:\n1. The prompt\n2. The input data\n3. The eval",
+    }
+
+    card = dispatcher.render_card(item)
+
+    assert "Voice review: WARN" in card
+    assert "numbered_framework" in card
+
+
+def test_dispatch_blocks_obvious_ai_slop(tmp_path):
+    queue = tmp_path / "queue"
+    approvals = tmp_path / "approvals"
+    queue.mkdir()
+    write_packet(
+        queue / "x-001.md",
+        body="Great point! Here's the thing: this game-changing framework unlocks value across the entire landscape. Thoughts?",
+    )
+
+    result = dispatcher.dispatch_next(queue_dirs=[queue], approvals_dir=approvals, dry_run=False)
+
+    assert result["status"] == "voice_blocked"
+    assert result["item"]["item_id"] == "x-001"
+    assert any(issue["code"] == "generic_reply_praise" for issue in result["voice_review"]["issues"])
+    assert not (approvals / "sent-approval-cards.json").exists()
+
+
 def test_load_social_batch_splits_real_batch_shape(tmp_path):
     queue = tmp_path / "queue"
     queue.mkdir()

@@ -12,9 +12,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from social_voice_review import format_review_for_card, review_social_copy  # noqa: E402
 
 VALID_PENDING_STATUSES = {"needs-review", "needs_review", "proposed", "pending", "draft"}
 TRACKER_PENDING_STATUSES = {"needs-review", "needs_review", "proposed", "pending", "draft", "awaiting approval"}
@@ -319,12 +323,17 @@ def render_card(item: dict[str, Any]) -> str:
     if len(copy) > 1200:
         copy = copy[:1197].rstrip() + "..."
     item_id = item["item_id"]
+    voice_review = review_social_copy(copy, platform=str(item.get("platform") or "Unknown"), kind=str(item.get("type") or "post"))
+    voice_text = ""
+    if voice_review["status"] != "pass":
+        voice_text = f"\n{format_review_for_card(voice_review)}\n"
     return (
         f"SOCIAL APPROVAL {item_id}\n"
         f"Platform: {item.get('platform') or 'Unknown'}\n"
         f"Type: {item.get('type') or 'post'}\n"
         f"Goal: {item.get('goal') or 'Review and approve exact content.'}\n"
-        f"Risk: {item.get('risk') or 'unknown'}\n\n"
+        f"Risk: {item.get('risk') or 'unknown'}\n"
+        f"{voice_text}\n"
         f"Copy:\n{copy}\n\n"
         f"Actions: approve {item_id} | revise {item_id}: <change> | later {item_id} | reject {item_id}"
     )
@@ -352,6 +361,13 @@ def dispatch_next(
             continue
         if item_id in decisions or item_id in sent_ids:
             continue
+        voice_review = review_social_copy(
+            item.get("copy") or "",
+            platform=str(item.get("platform") or "Unknown"),
+            kind=str(item.get("type") or "post"),
+        )
+        if voice_review["blocking"]:
+            return {"status": "voice_blocked", "item": item, "voice_review": voice_review}
         sent_record = {
             "item_id": item_id,
             "sent_at": int(time.time()),
