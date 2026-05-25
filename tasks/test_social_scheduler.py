@@ -109,6 +109,15 @@ def test_recover_legacy_linkedin_blocks_requeues_missing_publisher_blocks():
     assert state["items"]["LinkedIn-99"]["status"] == "blocked"
 
 
+def test_linkedin_post_parser_stops_before_article_and_reddit_sections():
+    drafts = scheduler.parse_first_batch()
+    linked_in = drafts["LinkedIn-03"]
+
+    assert "LINKEDIN ARTICLE OUTLINE" not in linked_in.content
+    assert "REDDIT OPPORTUNITIES" not in linked_in.content
+    assert linked_in.content.endswith("The operating discipline around it is what makes it usable.")
+
+
 def test_publish_due_linkedin_calls_exact_copy_publisher(monkeypatch, tmp_path):
     state = _due_linkedin_state()
     calls = []
