@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for social approved publish scheduler safety gates."""
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +23,34 @@ dispatcher_spec = importlib.util.spec_from_file_location("social_approval_next_c
 approval_dispatcher = importlib.util.module_from_spec(dispatcher_spec)
 sys.modules[dispatcher_spec.name] = approval_dispatcher
 dispatcher_spec.loader.exec_module(approval_dispatcher)
+
+
+def test_slots_for_uses_valid_metrics_recommendations(monkeypatch, tmp_path):
+    recs = tmp_path / "scheduling-recommendations.json"
+    recs.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "usable": True,
+                "timezone": "America/Chicago",
+                "generated_at": "2026-05-25T00:00:00+00:00",
+                "slots": {"X": {"post": ["10:05", "14:15"], "reply": ["18:10"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scheduler, "SCHEDULING_RECOMMENDATIONS", recs)
+
+    assert [slot.strftime("%H:%M") for slot in scheduler.slots_for("X", "post")] == ["10:05", "14:15"]
+    assert [slot.strftime("%H:%M") for slot in scheduler.slots_for("X", "reply")] == ["18:10"]
+
+
+def test_slots_for_falls_back_when_recommendations_low_confidence(monkeypatch, tmp_path):
+    recs = tmp_path / "scheduling-recommendations.json"
+    recs.write_text(json.dumps({"version": 1, "usable": False, "slots": {"X": {"post": ["03:00"]}}}), encoding="utf-8")
+    monkeypatch.setattr(scheduler, "SCHEDULING_RECOMMENDATIONS", recs)
+
+    assert scheduler.slots_for("X", "post") == scheduler.DEFAULT_SLOTS["X"]
 
 
 def test_readiness_preflight_allows_ready_with_warnings(tmp_path, monkeypatch):
