@@ -53,6 +53,92 @@ def test_slots_for_falls_back_when_recommendations_low_confidence(monkeypatch, t
     assert scheduler.slots_for("X", "post") == scheduler.DEFAULT_SLOTS["X"]
 
 
+def _due_linkedin_state():
+    return {
+        "items": {
+            "LinkedIn-02": {
+                "item_id": "LinkedIn-02",
+                "platform": "LinkedIn",
+                "kind": "post",
+                "title": "Flight training systems",
+                "status": "scheduled",
+                "scheduled_at": "2026-01-01T00:00:00+00:00",
+                "auto_publish": False,
+                "approval_event": {"action": "approve", "item_id": "LinkedIn-02"},
+            }
+        }
+    }
+
+
+def _linkedin_drafts():
+    return {
+        "LinkedIn-02": scheduler.Draft(
+            item_id="LinkedIn-02",
+            platform="LinkedIn",
+            kind="post",
+            title="Flight training systems",
+            content="Approved LinkedIn copy.",
+        )
+    }
+
+
+def test_publish_due_linkedin_calls_exact_copy_publisher(monkeypatch, tmp_path):
+    state = _due_linkedin_state()
+    calls = []
+    record_dir = tmp_path / "records"
+    record_dir.mkdir()
+    monkeypatch.setattr(scheduler, "readiness_preflight_blocked", lambda prefix="publish": None)
+    monkeypatch.setattr(scheduler, "update_tracker_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scheduler, "published_record_path", lambda item_id: record_dir / f"{item_id}.json")
+
+    def fake_publish(item_id, draft):
+        calls.append((item_id, draft.content))
+        return {"ok": True, "status": "published_or_submitted", "published_url": "https://www.linkedin.com/feed/update/urn:li:activity:test"}
+
+    monkeypatch.setattr(scheduler, "run_linkedin_publish", fake_publish)
+
+    messages, readiness_blocked = scheduler.publish_due(state, _linkedin_drafts(), execute=True)
+
+    assert readiness_blocked is False
+    assert calls == [("LinkedIn-02", "Approved LinkedIn copy.")]
+    assert state["items"]["LinkedIn-02"]["status"] == "published"
+    assert state["items"]["LinkedIn-02"]["published_url"] == "https://www.linkedin.com/feed/update/urn:li:activity:test"
+    assert any("[PUBLISHED] LinkedIn-02" in message for message in messages)
+
+
+def test_publish_due_linkedin_blocks_on_publisher_block(monkeypatch):
+    state = _due_linkedin_state()
+    monkeypatch.setattr(scheduler, "readiness_preflight_blocked", lambda prefix="publish": None)
+    monkeypatch.setattr(scheduler, "update_tracker_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        scheduler,
+        "run_linkedin_publish",
+        lambda item_id, draft: {"ok": False, "status": "blocked", "reason": "account_ambiguous"},
+    )
+
+    messages, _ = scheduler.publish_due(state, _linkedin_drafts(), execute=True)
+
+    item = state["items"]["LinkedIn-02"]
+    assert item["status"] == "blocked"
+    assert item["block_reason"] == "account_ambiguous"
+    assert any("account_ambiguous" in message for message in messages)
+
+
+def test_publish_due_linkedin_dry_run_does_not_call_publisher(monkeypatch):
+    state = _due_linkedin_state()
+
+    def fail_publish(*args, **kwargs):
+        raise AssertionError("dry-run must not call LinkedIn publisher")
+
+    monkeypatch.setattr(scheduler, "run_linkedin_publish", fail_publish, raising=False)
+
+    messages, readiness_blocked = scheduler.publish_due(state, _linkedin_drafts(), execute=False)
+
+    assert readiness_blocked is False
+    assert state["items"]["LinkedIn-02"]["status"] == "scheduled"
+    assert any("[DRY-RUN] due LinkedIn-02" in message for message in messages)
+
+
 def test_readiness_preflight_allows_ready_with_warnings(tmp_path, monkeypatch):
     readiness = tmp_path / "readiness.sh"
     readiness.write_text("#!/usr/bin/env bash\necho overall=READY_WITH_WARNINGS\nexit 1\n", encoding="utf-8")
