@@ -1,0 +1,47 @@
+version: "3.8"
+
+services:
+  browser-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: browser-agent
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-openrouter}
+      - LLM_MODEL=${LLM_MODEL:-anthropic/claude-sonnet-4}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY:-}
+      - PUBLIC_WEB_FETCH_TIMEOUT=${PUBLIC_WEB_FETCH_TIMEOUT:-8}
+      - PUBLIC_WEB_FETCH_MAX_BYTES=${PUBLIC_WEB_FETCH_MAX_BYTES:-1000000}
+      - BROWSER_PROFILE_DIR=/app/profiles
+      - OUTPUT_DIR=/app/output
+      - BOOKMARK_TRANSCRIBE_VIDEO=${BOOKMARK_TRANSCRIBE_VIDEO:-0}
+      - BOOKMARK_VIDEO_FETCH_TIMEOUT=${BOOKMARK_VIDEO_FETCH_TIMEOUT:-20}
+      - BOOKMARK_VIDEO_FETCH_MAX_BYTES=${BOOKMARK_VIDEO_FETCH_MAX_BYTES:-26214400}
+      - BOOKMARK_VIDEO_TRANSCRIBE_MAX_SECONDS=${BOOKMARK_VIDEO_TRANSCRIBE_MAX_SECONDS:-120}
+      - BOOKMARK_VIDEO_TRANSCRIBE_PROVIDER=${BOOKMARK_VIDEO_TRANSCRIBE_PROVIDER:-openrouter}
+      - BOOKMARK_VIDEO_TRANSCRIBE_MODEL=${BOOKMARK_VIDEO_TRANSCRIBE_MODEL:-openrouter/anthropic/claude-sonnet-4}
+      # Required only for approved X bookmark move/delete execution.
+      - X_BEARER_TOKEN=${X_BEARER_TOKEN:-}
+      # Connect to existing browserless/chrome container on homelab
+      - CHROME_HOST=${CHROME_HOST:-}
+      - CHROME_PORT=${CHROME_PORT:-9222}
+    volumes:
+      - ./profiles:/app/profiles:rw
+      - ./output:/app/output:rw
+      - ./scripts:/app/scripts:ro
+      - ./tasks:/app/tasks:ro
+    networks:
+      - browser-agent-network
+      # Optionally attach to social-media-agent network to reach its Chrome
+      - social-media-agent_social-agent-network
+    restart: "no"
+    # Run once and exit; use `docker compose run` for tasks
+    entrypoint: ["python3"]
+    command: ["--help"]
+
+networks:
+  browser-agent-network:
+    driver: bridge
+  social-media-agent_social-agent-network:
+    external: true
