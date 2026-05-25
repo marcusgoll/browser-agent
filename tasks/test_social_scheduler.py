@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for social approved publish scheduler safety gates."""
+import fcntl
 import importlib.util
 import json
 import sys
@@ -23,6 +24,23 @@ dispatcher_spec = importlib.util.spec_from_file_location("social_approval_next_c
 approval_dispatcher = importlib.util.module_from_spec(dispatcher_spec)
 sys.modules[dispatcher_spec.name] = approval_dispatcher
 dispatcher_spec.loader.exec_module(approval_dispatcher)
+
+
+def test_scheduler_lock_is_nonblocking(tmp_path):
+    lock_path = tmp_path / "scheduler.lock"
+    held = open(lock_path, "w", encoding="utf-8")
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    try:
+        assert scheduler.acquire_scheduler_lock(lock_path) is None
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        held.close()
+
+    acquired = scheduler.acquire_scheduler_lock(lock_path)
+    assert acquired is not None
+    fcntl.flock(acquired, fcntl.LOCK_UN)
+    acquired.close()
 
 
 def test_slots_for_uses_valid_metrics_recommendations(monkeypatch, tmp_path):
@@ -144,11 +162,10 @@ def test_publish_due_linkedin_calls_exact_copy_publisher(monkeypatch, tmp_path):
 
 def test_publish_due_linkedin_blocks_on_publisher_block(monkeypatch, tmp_path):
     state = _due_linkedin_state()
-    stale_record = tmp_path / "LinkedIn-02.json"
-    stale_record.write_text('{"status":"published"}\n', encoding="utf-8")
+    record = tmp_path / "LinkedIn-02.json"
     monkeypatch.setattr(scheduler, "readiness_preflight_blocked", lambda prefix="publish": None)
     monkeypatch.setattr(scheduler, "update_tracker_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(scheduler, "published_record_path", lambda item_id: stale_record)
+    monkeypatch.setattr(scheduler, "published_record_path", lambda item_id: record)
     monkeypatch.setattr(
         scheduler,
         "run_linkedin_publish",
@@ -160,7 +177,7 @@ def test_publish_due_linkedin_blocks_on_publisher_block(monkeypatch, tmp_path):
     item = state["items"]["LinkedIn-02"]
     assert item["status"] == "blocked"
     assert item["block_reason"] == "account_ambiguous"
-    assert not stale_record.exists()
+    assert not record.exists()
     assert any("account_ambiguous" in message for message in messages)
 
 
@@ -188,6 +205,31 @@ def test_run_linkedin_publish_ignores_stale_success_json(monkeypatch, tmp_path):
     assert result["ok"] is False
     assert result["status"] == "error"
     assert "did not write json" in result["reason"]
+
+
+def test_publish_due_preserves_concurrent_success_record(monkeypatch, tmp_path):
+    state = _due_linkedin_state()
+    record = tmp_path / "LinkedIn-02.json"
+    monkeypatch.setattr(scheduler, "readiness_preflight_blocked", lambda prefix="publish": None)
+    monkeypatch.setattr(scheduler, "update_tracker_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scheduler, "published_record_path", lambda item_id: record)
+
+    def ambiguous_publish(item_id, draft):
+        record.write_text(
+            json.dumps({"status": "published", "published_url": "https://www.linkedin.com/feed/"}),
+            encoding="utf-8",
+        )
+        return {"ok": False, "status": "blocked", "reason": "post click returned but composer remained open"}
+
+    monkeypatch.setattr(scheduler, "run_linkedin_publish", ambiguous_publish)
+
+    messages, _ = scheduler.publish_due(state, _linkedin_drafts(), execute=True)
+
+    item = state["items"]["LinkedIn-02"]
+    assert item["status"] == "published"
+    assert item["published_url"] == "https://www.linkedin.com/feed/"
+    assert "block_reason" not in item
+    assert any("[PUBLISHED] LinkedIn-02" in message for message in messages)
 
 
 def test_publish_due_linkedin_dry_run_does_not_call_publisher(monkeypatch):
