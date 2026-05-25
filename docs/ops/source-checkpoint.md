@@ -8,7 +8,9 @@ This repository is the managed source checkpoint for the live browser-agent ops 
 
 - Source repo: /home/orchestrator/repos/local/browser-agent
 - Live ops workspace: /home/orchestrator/browser-agent
-- Safe sync helper: /home/orchestrator/repos/local/browser-agent/scripts/sync_to_live.sh
+- Live workspace sync helper: /home/orchestrator/repos/local/browser-agent/scripts/sync_to_live.sh
+- Hermes wrapper sync helper: /home/orchestrator/repos/local/browser-agent/scripts/sync_hermes_scripts.sh
+- Versioned Hermes wrappers: /home/orchestrator/repos/local/browser-agent/ops/hermes-scripts/
 
 The live workspace remains in place because Hermes cron jobs and runtime artifacts currently reference it directly.
 
@@ -34,8 +36,10 @@ Safe flow:
 3. Commit reviewed source changes.
 4. Preview live sync with `scripts/sync_to_live.sh --dry-run`.
 5. Apply live sync with `scripts/sync_to_live.sh --apply` only after reviewing the dry-run.
-6. Run the live workspace canonical test command.
-7. Run only dry-run/report wrappers unless Marcus explicitly approves execution.
+6. Preview Hermes wrapper deployment with `scripts/sync_hermes_scripts.sh --dry-run`.
+7. Apply Hermes wrapper deployment with `scripts/sync_hermes_scripts.sh --apply` only after source is committed.
+8. Run the live workspace canonical test command.
+9. Run only dry-run/report wrappers unless Marcus explicitly approves execution.
 
 Do not replace /home/orchestrator/browser-agent with this repo or a symlink until a dedicated migration updates and verifies all Hermes cron job workdirs/scripts.
 
@@ -48,6 +52,8 @@ The following Hermes cron jobs still use /home/orchestrator/browser-agent as wor
 - x-bookmark-wiki-sync
 - x-bookmark-agent-feed
 - x-bookmark-public-web-followup
+
+These scripts are now versioned in `ops/hermes-scripts/` and deployed into `/home/orchestrator/.hermes/scripts/` as real executable files with `scripts/sync_hermes_scripts.sh`. They default to `/home/orchestrator/browser-agent` for cron compatibility, but support `BROWSER_AGENT_WORKDIR` for a future migration.
 
 ## Canonical tests
 
@@ -72,8 +78,9 @@ docker compose run --rm browser-agent scripts/run_tests.py
 2. Preserve /home/orchestrator/browser-agent/profiles and output outside git.
 3. Update cron workdirs from /home/orchestrator/browser-agent to the chosen final path, or keep a deliberate compatibility symlink.
 4. Preview and apply source-to-live sync with `scripts/sync_to_live.sh`.
-5. Rebuild Docker image from the repo path.
-6. Run canonical tests.
-7. Run x-bookmark-processor.sh in dry-run mode.
-8. Run x-bookmark-agent-feed.sh and verify opportunity memo/high-ROI task output.
-9. Confirm no cron job points to a removed path.
+5. Preview and apply Hermes wrapper sync with `scripts/sync_hermes_scripts.sh` after updating `BROWSER_AGENT_WORKDIR` defaults or the cron environment.
+6. Rebuild Docker image from the repo path.
+7. Run canonical tests.
+8. Run x-bookmark-processor.sh in dry-run mode.
+9. Run x-bookmark-agent-feed.sh and verify opportunity memo/high-ROI task output.
+10. Confirm no cron job points to a removed path.

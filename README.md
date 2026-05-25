@@ -154,6 +154,13 @@ Source repo to live sync:
 
 The sync helper excludes .env, profiles/, output/, caches, and runtime browser state. It refuses a dirty source tree unless --allow-dirty is passed.
 
+Hermes wrapper scripts are also source-controlled:
+   cd /home/orchestrator/repos/local/browser-agent
+   scripts/sync_hermes_scripts.sh --dry-run
+   scripts/sync_hermes_scripts.sh --apply
+
+Those wrappers live in ops/hermes-scripts/ and are copied into /home/orchestrator/.hermes/scripts/ as real executable files. Do not symlink them; Hermes cron rejects symlinked scripts. The wrappers default to /home/orchestrator/browser-agent for live cron compatibility and can be pointed elsewhere with BROWSER_AGENT_WORKDIR during a future migration.
+
 Canonical Tests
 ---------------
 Run tests inside Docker, not host Python:
