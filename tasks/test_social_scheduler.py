@@ -68,6 +68,38 @@ def test_approval_card_preflight_blocks_hard_failure(tmp_path, monkeypatch):
         raise AssertionError("expected hard readiness failure to block approval card dispatch")
 
 
+def test_scheduler_parse_first_batch_stops_last_reply_before_global_metadata(monkeypatch, tmp_path):
+    queue = tmp_path / "queue.md"
+    queue.write_text(
+        """status: needs-review
+exact_content: |
+  X REPLY DRAFTS
+
+  XReply-05 - Blake Neff / clever marketing
+  Target URL: https://x.com/BlakeSNeff/status/2
+  Target context: Comment on clever marketing.
+  Reply:
+  That’s the kind of marketing I actually like.
+
+media:
+  - none
+links:
+  - none
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scheduler, "QUEUE", queue)
+
+    drafts = scheduler.parse_first_batch()
+    reply = drafts["XReply-05"]
+
+    assert reply.content == "That’s the kind of marketing I actually like."
+    assert reply.target_url == "https://x.com/BlakeSNeff/status/2"
+    assert "media:" not in reply.content
+    review = scheduler.review_social_copy(reply.content, platform=reply.platform, kind=reply.kind)
+    assert review["blocking"] is False
+
+
 def test_schedule_new_approvals_blocks_ai_slop_before_scheduling(monkeypatch):
     state = {"items": {}}
     drafts = {
