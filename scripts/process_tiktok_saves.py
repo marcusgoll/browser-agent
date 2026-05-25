@@ -21,6 +21,12 @@ from urllib.parse import urlparse
 PROFILE_DIR = os.environ.get("BROWSER_PROFILE_DIR", "/app/profiles")
 DEFAULT_PROFILE = "tiktok-profile"
 DEFAULT_OUTPUT_DIR = Path("/app/output/tiktok")
+TIKTOK_HOME = "https://www.tiktok.com/"
+TIKTOK_SAVED_SURFACES = (
+    "https://www.tiktok.com/favorites",
+    "https://www.tiktok.com/@me/favorites",
+    "https://www.tiktok.com/@me?tab=favorites",
+)
 
 RECIPE_WORDS = {
     "recipe",
@@ -84,6 +90,10 @@ MUTATION_CONTROL_RE = re.compile(
     r"\b(like|favorite|save|follow|comment|share|delete|message|shop|publish|schedule)\b",
     re.IGNORECASE,
 )
+
+
+class AuthDetectionError(RuntimeError):
+    """Raised when the page auth state cannot be safely determined."""
 
 
 def utc_now_iso() -> str:
@@ -339,6 +349,26 @@ def write_requires_user_summary(output_dir: Path) -> dict[str, Any]:
     return summary
 
 
+def write_extraction_failed_summary(output_dir: Path, error: str) -> dict[str, Any]:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = build_run_summary([], [], [], "extraction_failed")
+    summary["error"] = error
+    (output_dir / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return summary
+
+
+def profile_user_data_dir(profile: str) -> Path:
+    if not profile or profile in {".", ".."}:
+        raise ValueError("--profile must be a simple profile directory name")
+    profile_path = Path(profile)
+    if profile_path.is_absolute() or len(profile_path.parts) != 1 or profile_path.name != profile:
+        raise ValueError("--profile must be a simple profile directory name under BROWSER_PROFILE_DIR")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", profile):
+        raise ValueError("--profile may contain only letters, numbers, dot, underscore, and dash")
+    return Path(PROFILE_DIR) / profile
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only TikTok saved/favorites recipe and tip intake")
     parser.add_argument("--dry-run", action="store_true", default=True, help="Read-only mode (default; v0 has no execute mode)")
@@ -390,8 +420,8 @@ async def _looks_login_required(page: Any) -> bool:
         text = (await page.locator("body").inner_text(timeout=3000)).lower()
         login_markers = ["log in to tiktok", "sign up for tiktok", "continue with google", "use phone / email"]
         return any(marker in text for marker in login_markers)
-    except Exception:
-        return False
+    except Exception as exc:
+        raise AuthDetectionError(f"Could not determine TikTok auth state: {type(exc).__name__}: {exc}") from exc
 
 
 async def extract_saved_items(page: Any, max_items: int) -> list[dict[str, Any]]:
@@ -434,31 +464,48 @@ def build_cards(raw_records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
     return recipes, tips
 
 
+async def extract_from_saved_surfaces(page: Any, output_dir: Path, max_items: int) -> dict[str, Any]:
+    """Navigate read-only TikTok saved/favorites surfaces and write artifacts."""
+    try:
+        await page.goto(TIKTOK_HOME, wait_until="domcontentloaded", timeout=45000)
+        if await _looks_login_required(page):
+            return write_requires_user_summary(output_dir)
+    except AuthDetectionError as exc:
+        return write_extraction_failed_summary(output_dir, str(exc))
+    except Exception as exc:
+        return write_extraction_failed_summary(output_dir, f"Initial TikTok navigation failed: {type(exc).__name__}: {exc}")
+
+    errors: list[str] = []
+    for target in TIKTOK_SAVED_SURFACES:
+        try:
+            await page.goto(target, wait_until="domcontentloaded", timeout=45000)
+            if await _looks_login_required(page):
+                return write_requires_user_summary(output_dir)
+            raw_records = await extract_saved_items(page, max_items)
+        except AuthDetectionError as exc:
+            return write_extraction_failed_summary(output_dir, str(exc))
+        except Exception as exc:
+            errors.append(f"{target}: {type(exc).__name__}: {exc}")
+            continue
+        if raw_records:
+            recipes, tips = build_cards(raw_records)
+            return write_artifacts(output_dir, raw_records, recipes, tips, status="ok")
+
+    if errors:
+        return write_extraction_failed_summary(output_dir, "No saved/favorites records found; candidate errors: " + "; ".join(errors))
+    return write_extraction_failed_summary(output_dir, "No records found on TikTok saved/favorites candidate surfaces")
+
+
 async def process_tiktok_saves(profile: str, output_dir: Path, max_items: int, headless: bool) -> dict[str, Any]:
+    user_data_dir = str(profile_user_data_dir(profile))
+
     from playwright.async_api import async_playwright
 
-    user_data_dir = str(Path(PROFILE_DIR) / profile)
     async with async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(user_data_dir=user_data_dir, headless=headless, args=["--no-sandbox"])
         page = await context.new_page()
         try:
-            await page.goto("https://www.tiktok.com/", wait_until="domcontentloaded", timeout=45000)
-            if await _looks_login_required(page):
-                return write_requires_user_summary(output_dir)
-            # Read-only navigation; no mutation controls are clicked.
-            for target in ("https://www.tiktok.com/favorites", "https://www.tiktok.com/@me"):
-                try:
-                    await page.goto(target, wait_until="domcontentloaded", timeout=45000)
-                    if not await _looks_login_required(page):
-                        break
-                except Exception:
-                    continue
-            if await _looks_login_required(page):
-                return write_requires_user_summary(output_dir)
-            raw_records = await extract_saved_items(page, max_items)
-            recipes, tips = build_cards(raw_records)
-            status = "ok" if raw_records else "partial"
-            return write_artifacts(output_dir, raw_records, recipes, tips, status=status)
+            return await extract_from_saved_surfaces(page, output_dir, max_items)
         finally:
             await context.close()
 
@@ -469,7 +516,7 @@ async def main_async(argv: list[str] | None = None) -> int:
     try:
         summary = await process_tiktok_saves(args.profile, args.output_dir, args.max_items, args.headless)
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0 if summary.get("status") in {"ok", "partial", "requires_user"} else 1
+        return 0 if summary.get("status") in {"ok", "requires_user"} else 1
     except Exception as exc:
         output_dir = getattr(args, "output_dir", DEFAULT_OUTPUT_DIR)
         output_dir.mkdir(parents=True, exist_ok=True)

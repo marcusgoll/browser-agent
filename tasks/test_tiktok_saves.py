@@ -2,6 +2,7 @@
 """Deterministic tests for the read-only TikTok saved/favorites intake."""
 
 import json
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -11,6 +12,39 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import process_tiktok_saves as pts  # noqa: E402
+
+
+class FakeLocator:
+    def __init__(self, text=None, exc=None):
+        self.text = text or ""
+        self.exc = exc
+
+    async def inner_text(self, timeout=3000):
+        if self.exc:
+            raise self.exc
+        return self.text
+
+
+class FakePage:
+    def __init__(self, *, body_by_url=None, cards_by_url=None, evaluate_exc_by_url=None, locator_exc_by_url=None):
+        self.url = ""
+        self.gotos = []
+        self.body_by_url = body_by_url or {}
+        self.cards_by_url = cards_by_url or {}
+        self.evaluate_exc_by_url = evaluate_exc_by_url or {}
+        self.locator_exc_by_url = locator_exc_by_url or {}
+
+    async def goto(self, target, wait_until="domcontentloaded", timeout=45000):
+        self.url = target
+        self.gotos.append(target)
+
+    def locator(self, selector):
+        return FakeLocator(self.body_by_url.get(self.url, ""), self.locator_exc_by_url.get(self.url))
+
+    async def evaluate(self, script, max_items):
+        if self.url in self.evaluate_exc_by_url:
+            raise self.evaluate_exc_by_url[self.url]
+        return self.cards_by_url.get(self.url, [])[:max_items]
 
 
 class TikTokSavedTransformTests(unittest.TestCase):
@@ -202,6 +236,73 @@ def test_requires_user_summary_written_when_auth_missing(tmp_path):
     assert summary["status"] == "requires_user"
     saved = json.loads((tmp_path / "run_summary.json").read_text())
     assert saved["status"] == "requires_user"
+
+
+def test_auth_required_short_circuits_browser_orchestration(tmp_path):
+    page = FakePage(body_by_url={"https://www.tiktok.com/": "Log in to TikTok"})
+    summary = asyncio.run(pts.extract_from_saved_surfaces(page, tmp_path, max_items=10))
+    assert summary["status"] == "requires_user"
+    assert page.gotos == ["https://www.tiktok.com/"]
+    assert json.loads((tmp_path / "run_summary.json").read_text())["status"] == "requires_user"
+
+
+def test_first_saved_candidate_empty_then_second_candidate_collects_records(tmp_path):
+    second_surface = pts.TIKTOK_SAVED_SURFACES[1]
+    page = FakePage(
+        cards_by_url={
+            pts.TIKTOK_SAVED_SURFACES[0]: [],
+            second_surface: [
+                {
+                    "href": "https://www.tiktok.com/@chef/video/7351234567890123456",
+                    "text": "Easy chicken dinner #FoodTok",
+                    "caption": "Easy chicken dinner #FoodTok",
+                }
+            ],
+        }
+    )
+    summary = asyncio.run(pts.extract_from_saved_surfaces(page, tmp_path, max_items=10))
+    assert summary["status"] == "ok"
+    assert summary["raw_count"] == 1
+    assert "https://www.tiktok.com/@me" not in page.gotos
+    assert json.loads((tmp_path / "run_summary.json").read_text())["status"] == "ok"
+
+
+def test_all_saved_candidates_empty_writes_extraction_failed(tmp_path):
+    page = FakePage(cards_by_url={surface: [] for surface in pts.TIKTOK_SAVED_SURFACES})
+    summary = asyncio.run(pts.extract_from_saved_surfaces(page, tmp_path, max_items=10))
+    assert summary["status"] == "extraction_failed"
+    assert summary["raw_count"] == 0
+    assert json.loads((tmp_path / "run_summary.json").read_text())["status"] == "extraction_failed"
+
+
+def test_evaluate_exception_writes_extraction_failed_not_partial(tmp_path):
+    page = FakePage(evaluate_exc_by_url={surface: RuntimeError("selector/evaluate failed") for surface in pts.TIKTOK_SAVED_SURFACES})
+    summary = asyncio.run(pts.extract_from_saved_surfaces(page, tmp_path, max_items=10))
+    assert summary["status"] == "extraction_failed"
+    assert "selector/evaluate failed" in summary["error"]
+
+
+def test_login_detector_exceptions_are_auth_unknown_errors():
+    page = FakePage(locator_exc_by_url={"https://www.tiktok.com/": RuntimeError("body unavailable")})
+    page.url = "https://www.tiktok.com/"
+    with pytest.raises(pts.AuthDetectionError):
+        asyncio.run(pts._looks_login_required(page))
+
+
+def test_profile_path_traversal_rejected():
+    for profile in ("../outside", "/tmp/profile", "nested/profile", "..", ".", ""):
+        with pytest.raises(ValueError):
+            pts.profile_user_data_dir(profile)
+    assert str(pts.profile_user_data_dir("safe-profile_1.2")).endswith("/safe-profile_1.2")
+
+
+def test_main_returns_nonzero_for_extraction_failed_status(tmp_path, monkeypatch):
+    async def fake_process(profile, output_dir, max_items, headless):
+        return pts.write_extraction_failed_summary(output_dir, "no saved/favorites records found")
+
+    monkeypatch.setattr(pts, "process_tiktok_saves", fake_process)
+    exit_code = asyncio.run(pts.main_async(["--output-dir", str(tmp_path)]))
+    assert exit_code == 1
 
 
 def test_readme_documents_tiktok_read_only_workflow():
