@@ -85,6 +85,15 @@ def select_unique_activity_url(snippet: str, candidates: list[dict[str, str]]) -
     return {"ok": False, "status": "blocked", "reason": "multiple_matching_linkedin_posts", "matches": unique}
 
 
+def classify_lookup_page(url: str, visible_text: str) -> dict[str, Any]:
+    text = normalize_text(visible_text).lower()
+    if any(marker in text for marker in ["join linkedin", "already on linkedin? sign in", "agree & join", "sign in"]):
+        return {"ok": False, "status": "blocked", "reason": "linkedin_not_authenticated", "url": url}
+    if "checkpoint" in (url or "") or "challenge" in (url or ""):
+        return {"ok": False, "status": "blocked", "reason": "linkedin_auth_challenge", "url": url}
+    return {"ok": True, "status": "authenticated", "reason": "linkedin_lookup_page_ready", "url": url}
+
+
 async def collect_candidates(page: Any) -> list[dict[str, str]]:
     # Read-only DOM scan. No composer actions, no secrets/storage access.
     return await page.evaluate(
@@ -140,6 +149,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             for url in ["https://www.linkedin.com/feed/", "https://www.linkedin.com/in/marcusgollahon/recent-activity/all/"]:
                 await page.goto(url, wait_until="domcontentloaded", timeout=args.timeout * 1000)
                 await page.wait_for_timeout(3000)
+                visible = await page.locator("body").inner_text(timeout=5000)
+                page_state = classify_lookup_page(page.url, visible)
+                if not page_state.get("ok"):
+                    page_state.update({"item_id": args.item_id, "snippet": snippet, "screenshot": await screenshot(page, "blocked_auth"), "secrets_policy": SECRETS_POLICY})
+                    return page_state
                 candidates = await collect_candidates(page)
                 result = select_unique_activity_url(snippet, candidates)
                 if result.get("ok"):

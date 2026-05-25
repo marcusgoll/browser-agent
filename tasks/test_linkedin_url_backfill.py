@@ -65,6 +65,17 @@ def test_select_unique_activity_url_matches_truncated_visible_feed_card():
     assert result["published_url"] == "https://www.linkedin.com/feed/update/urn:li:activity:123456/"
 
 
+def test_classify_lookup_page_blocks_login_or_join_surface():
+    result = backfill.classify_lookup_page(
+        "https://www.linkedin.com/signup",
+        "Join LinkedIn Email Password Agree & Join Already on LinkedIn? Sign in",
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["reason"] == "linkedin_not_authenticated"
+
+
 def test_select_unique_activity_url_blocks_zero_or_multiple_matches():
     assert backfill.select_unique_activity_url("missing", [])["status"] == "blocked"
 
