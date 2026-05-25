@@ -82,6 +82,33 @@ def _linkedin_drafts():
     }
 
 
+def test_recover_legacy_linkedin_blocks_requeues_missing_publisher_blocks():
+    state = {
+        "items": {
+            "LinkedIn-02": {
+                "platform": "LinkedIn",
+                "status": "blocked",
+                "block_reason": "no unattended publisher configured for LinkedIn",
+                "auto_publish": False,
+            },
+            "LinkedIn-99": {
+                "platform": "LinkedIn",
+                "status": "blocked",
+                "block_reason": "account_ambiguous",
+                "auto_publish": False,
+            },
+        }
+    }
+
+    recovered = scheduler.recover_legacy_linkedin_blocks(state)
+
+    assert recovered == ["LinkedIn-02"]
+    assert state["items"]["LinkedIn-02"]["status"] == "scheduled"
+    assert state["items"]["LinkedIn-02"]["auto_publish"] is True
+    assert "block_reason" not in state["items"]["LinkedIn-02"]
+    assert state["items"]["LinkedIn-99"]["status"] == "blocked"
+
+
 def test_publish_due_linkedin_calls_exact_copy_publisher(monkeypatch, tmp_path):
     state = _due_linkedin_state()
     calls = []
