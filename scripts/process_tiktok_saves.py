@@ -418,7 +418,13 @@ async def _looks_login_required(page: Any) -> bool:
         if "/login" in url.lower():
             return True
         text = (await page.locator("body").inner_text(timeout=3000)).lower()
-        login_markers = ["log in to tiktok", "sign up for tiktok", "continue with google", "use phone / email"]
+        login_markers = [
+            "log in",
+            "log in to tiktok",
+            "sign up for tiktok",
+            "continue with google",
+            "use phone / email",
+        ]
         return any(marker in text for marker in login_markers)
     except Exception as exc:
         raise AuthDetectionError(f"Could not determine TikTok auth state: {type(exc).__name__}: {exc}") from exc

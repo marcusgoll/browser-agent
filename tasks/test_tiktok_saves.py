@@ -239,7 +239,7 @@ def test_requires_user_summary_written_when_auth_missing(tmp_path):
 
 
 def test_auth_required_short_circuits_browser_orchestration(tmp_path):
-    page = FakePage(body_by_url={"https://www.tiktok.com/": "Log in to TikTok"})
+    page = FakePage(body_by_url={"https://www.tiktok.com/": "For You\nLog in\nGet App"})
     summary = asyncio.run(pts.extract_from_saved_surfaces(page, tmp_path, max_items=10))
     assert summary["status"] == "requires_user"
     assert page.gotos == ["https://www.tiktok.com/"]
