@@ -345,7 +345,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", default=DEFAULT_PROFILE, help="Persistent browser profile name")
     parser.add_argument("--max", dest="max_items", type=int, default=50, help="Maximum visible saved/favorite items to collect")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Artifact output directory")
-    parser.add_argument("--headless", action="store_true", default=False, help="Run browser headless")
+    parser.add_argument("--headless", action="store_true", default=True, help="Run browser headless (default)")
+    parser.add_argument("--headed", dest="headless", action="store_false", help="Open a visible browser for attended debugging")
     return parser
 
 

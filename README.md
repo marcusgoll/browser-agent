@@ -162,6 +162,8 @@ Read-only run:
    cd /home/orchestrator/browser-agent
    docker compose run --rm browser-agent scripts/process_tiktok_saves.py --dry-run --max 50
 
+The read-only run defaults to headless Chromium. Use `--headed` only for attended debugging inside the VNC container.
+
 Safety: process_tiktok_saves.py has no execute mode and no mutation mode. It does not like, favorite, save, follow, comment, share, delete, message, shop, publish, or schedule anything. If TikTok requires login, it writes output/tiktok/run_summary.json with status requires_user and exits without attempting credential entry.
 
 Source Repo Sync

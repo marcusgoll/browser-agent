@@ -169,6 +169,7 @@ class TikTokSavedCliTests(unittest.TestCase):
         self.assertTrue(args.dry_run)
         self.assertEqual(args.profile, pts.DEFAULT_PROFILE)
         self.assertEqual(args.output_dir, pts.DEFAULT_OUTPUT_DIR)
+        self.assertTrue(args.headless)
 
     def test_parse_args_exposes_no_execute_flag(self):
         parser = pts.build_parser()
