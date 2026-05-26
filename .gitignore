@@ -44,3 +44,6 @@ htmlcov/
 *.tmp
 *.bak
 *.swp
+
+# Local brainstorming visual companion artifacts
+.superpowers/
