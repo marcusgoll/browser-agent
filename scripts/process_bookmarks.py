@@ -17,6 +17,7 @@ import sys
 import json
 import asyncio
 import argparse
+import hashlib
 import html
 import ipaddress
 import re
@@ -39,6 +40,8 @@ import bookmark_schema
 PROFILE_DIR = os.environ.get("BROWSER_PROFILE_DIR", "/app/profiles")
 OUTPUT_DIR = Path("/app/output")
 OUTPUT_DIR.mkdir(exist_ok=True)
+BOOKMARK_ANALYSIS_CACHE_FILE = OUTPUT_DIR / "bookmark_analysis_cache_v1.json"
+BOOKMARK_ANALYSIS_CACHE_VERSION = "bookmark-analysis-cache-v1"
 FETCH_TIMEOUT_SECONDS = int(os.environ.get("BOOKMARK_LINK_FETCH_TIMEOUT", "8"))
 FETCH_MAX_BYTES = int(os.environ.get("BOOKMARK_LINK_FETCH_MAX_BYTES", str(1024 * 1024)))
 FETCH_SNIPPET_CHARS = int(os.environ.get("BOOKMARK_LINK_SNIPPET_CHARS", "2500"))
@@ -418,6 +421,182 @@ class _MetadataHTMLParser(HTMLParser):
 
 def _clean_text(text):
     return re.sub(r'\s+', ' ', html.unescape(text or '')).strip()
+
+
+TRACKING_QUERY_KEYS = {
+    'fbclid',
+    'gclid',
+    'mc_cid',
+    'mc_eid',
+    'ref',
+    'ref_src',
+    's',
+}
+
+
+def _stable_hash(payload):
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_x_status_url(parsed):
+    host = (parsed.hostname or '').lower()
+    return host in ('x.com', 'www.x.com', 'twitter.com', 'www.twitter.com') and re.search(r'/status/\d+', parsed.path)
+
+
+def normalize_bookmark_url(url):
+    """Return a deterministic URL identity for bookmark dedupe/cache keys."""
+    url = _normalize_candidate_url(url)
+    if not url:
+        return ''
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return ''
+
+    scheme = parsed.scheme.lower()
+    hostname = parsed.hostname.lower()
+    if hostname in ('twitter.com', 'www.twitter.com', 'www.x.com'):
+        hostname = 'x.com'
+    port = f":{parsed.port}" if parsed.port and (scheme, parsed.port) not in (('http', 80), ('https', 443)) else ''
+    netloc = f"{hostname}{port}"
+
+    path = urllib.parse.unquote(parsed.path or '/')
+    path = re.sub(r'/+', '/', path).rstrip('/') or '/'
+
+    status_match = re.search(r'/status/(\d+)', path)
+    if _is_x_status_url(parsed) and status_match:
+        path = f"/i/web/status/{status_match.group(1)}"
+        query = ''
+    else:
+        query_pairs = []
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            key_lower = key.lower()
+            if key_lower.startswith('utm_') or key_lower in TRACKING_QUERY_KEYS:
+                continue
+            query_pairs.append((key, value))
+        query_pairs.sort()
+        query = urllib.parse.urlencode(query_pairs, doseq=True)
+
+    return urllib.parse.urlunparse((scheme, netloc, path, '', query, ''))
+
+
+def bookmark_content_hash(bookmark):
+    """Hash stable content fields when a bookmark has no usable canonical URL."""
+    external_urls = []
+    for item in bookmark.get('external_urls') or []:
+        normalized = normalize_bookmark_url(item.get('expanded_url') or item.get('url'))
+        if normalized:
+            external_urls.append(normalized)
+    card = bookmark.get('card') or {}
+    media = bookmark.get('media') or []
+    payload = {
+        'author': (bookmark.get('author') or '').lower(),
+        'text': _clean_text(bookmark.get('text') or ''),
+        'timestamp': bookmark.get('timestamp') or '',
+        'external_urls': sorted(set(external_urls)),
+        'card': {
+            'url': normalize_bookmark_url(card.get('url') or ''),
+            'title': _clean_text(card.get('title') or ''),
+            'description': _clean_text(card.get('description') or ''),
+        },
+        'media': [
+            {
+                'id': item.get('id'),
+                'type': item.get('type'),
+                'media_url': normalize_bookmark_url(item.get('media_url') or ''),
+                'alt_text': _clean_text(item.get('alt_text') or ''),
+            }
+            for item in media
+        ],
+    }
+    return _stable_hash(payload)
+
+
+def bookmark_dedupe_key(bookmark):
+    normalized_url = normalize_bookmark_url(bookmark.get('url') or '')
+    if normalized_url:
+        return f"url:{normalized_url}"
+    return f"content:{bookmark_content_hash(bookmark)}"
+
+
+def _cache_analysis_payload(result):
+    return {
+        'folder': result.get('folder'),
+        'reason': result.get('reason'),
+        'insights': result.get('insights'),
+        'actionable': result.get('actionable'),
+    }
+
+
+async def analyze_bookmarks_with_cache(bookmarks, analyze_func, cache=None):
+    """Deduplicate same-run inputs and reuse cached analysis across repeated runs."""
+    cache = cache if cache is not None else {}
+    cache['version'] = BOOKMARK_ANALYSIS_CACHE_VERSION
+    entries = cache.setdefault('entries', {})
+    stats = {'hits': 0, 'misses': 0, 'duplicates_suppressed': 0}
+    duplicates = []
+    results = []
+    seen = {}
+
+    for index, bookmark in enumerate(bookmarks or []):
+        key = bookmark_dedupe_key(bookmark)
+        if key in seen:
+            stats['duplicates_suppressed'] += 1
+            duplicates.append({
+                'duplicate_index': index,
+                'original_index': seen[key],
+                'cache_key': key,
+                'url': bookmark.get('url') or '',
+            })
+            continue
+        seen[key] = index
+
+        cached = entries.get(key)
+        if cached and isinstance(cached.get('analysis'), dict):
+            stats['hits'] += 1
+            result = {**bookmark, **cached['analysis']}
+            result['cache_status'] = 'hit'
+            result['cache_key'] = key
+            results.append(result)
+            continue
+
+        stats['misses'] += 1
+        analyzed = await analyze_func(bookmark)
+        result = {**bookmark, **analyzed}
+        result['cache_status'] = 'miss'
+        result['cache_key'] = key
+        entries[key] = {
+            'analysis': _cache_analysis_payload(result),
+            'cached_at': datetime.now().isoformat(),
+            'source_url': bookmark.get('url') or '',
+            'content_hash': bookmark_content_hash(bookmark),
+        }
+        results.append(result)
+
+    return {'results': results, 'cache': cache, 'cache_stats': stats, 'duplicates': duplicates}
+
+
+def load_bookmark_analysis_cache(path=BOOKMARK_ANALYSIS_CACHE_FILE):
+    try:
+        with open(path) as f:
+            cache = json.load(f)
+    except FileNotFoundError:
+        return {'version': BOOKMARK_ANALYSIS_CACHE_VERSION, 'entries': {}}
+    except Exception as exc:
+        return {'version': BOOKMARK_ANALYSIS_CACHE_VERSION, 'entries': {}, 'load_error': str(exc)[:300]}
+    if not isinstance(cache, dict) or not isinstance(cache.get('entries'), dict):
+        return {'version': BOOKMARK_ANALYSIS_CACHE_VERSION, 'entries': {}, 'load_error': 'invalid cache shape'}
+    cache['version'] = BOOKMARK_ANALYSIS_CACHE_VERSION
+    return cache
+
+
+def save_bookmark_analysis_cache(cache, path=BOOKMARK_ANALYSIS_CACHE_FILE):
+    path.parent.mkdir(exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + '.tmp')
+    with open(tmp_path, 'w') as f:
+        json.dump(cache, f, indent=2, sort_keys=True)
+    os.replace(tmp_path, path)
 
 
 def _parse_html_metadata(source_url, content_type, body):
@@ -1093,38 +1272,52 @@ async def process_bookmarks(dry_run=True, max_bookmarks=20):
         print("\n[2/4] Initializing LLM...")
         llm = get_llm()
         
-        # Analyze each bookmark
+        # Analyze each unique bookmark, reusing cached analysis where the input is unchanged.
         print(f"\n[3/4] Enriching and analyzing bookmarks (max {max_bookmarks})...")
-        results = []
         action_results = []
         folder_cache = {}
-        
-        for i, bookmark in enumerate(bookmarks[:max_bookmarks]):
-            print(f"\n  [{i+1}/{min(len(bookmarks), max_bookmarks)}] @{bookmark['author']}: {bookmark['text'][:60]}...")
-            
-            bookmark = await enrich_bookmark_links(page, bookmark)
-            bookmark = await enrich_bookmark_media(bookmark)
-            if bookmark.get('link_enrichment'):
-                ok = sum(1 for item in bookmark['link_enrichment'] if item.get('status') == 'ok')
-                print(f"    → Link enrichment: {ok}/{len(bookmark['link_enrichment'])} ok")
-            if bookmark.get('media_enrichment'):
-                ok = sum(1 for item in bookmark['media_enrichment'] if item.get('status') == 'ok')
-                print(f"    → Media enrichment: {ok}/{len(bookmark['media_enrichment'])} ok")
-            analysis = await analyze_bookmark(llm, bookmark)
-            
-            result = {
-                **bookmark,
-                **analysis,
-                'processed_at': datetime.now().isoformat()
-            }
-            results.append(result)
-            
+        target_bookmarks = bookmarks[:max_bookmarks]
+        analysis_cache = load_bookmark_analysis_cache()
+        if analysis_cache.get('load_error'):
+            print(f"    → Analysis cache reset: {analysis_cache['load_error']}")
+
+        async def analyze_miss(bookmark):
+            print(f"\n  [MISS] @{bookmark['author']}: {bookmark['text'][:60]}...")
+            enriched = await enrich_bookmark_links(page, bookmark)
+            enriched = await enrich_bookmark_media(enriched)
+            if enriched.get('link_enrichment'):
+                ok = sum(1 for item in enriched['link_enrichment'] if item.get('status') == 'ok')
+                print(f"    → Link enrichment: {ok}/{len(enriched['link_enrichment'])} ok")
+            if enriched.get('media_enrichment'):
+                ok = sum(1 for item in enriched['media_enrichment'] if item.get('status') == 'ok')
+                print(f"    → Media enrichment: {ok}/{len(enriched['media_enrichment'])} ok")
+            analysis = await analyze_bookmark(llm, enriched)
+            return {**enriched, **analysis}
+
+        analysis_run = await analyze_bookmarks_with_cache(target_bookmarks, analyze_miss, cache=analysis_cache)
+        results = analysis_run['results']
+        save_bookmark_analysis_cache(analysis_run['cache'])
+        cache_stats = analysis_run['cache_stats']
+        print(
+            "    → Analysis cache: "
+            f"{cache_stats['hits']} hits, {cache_stats['misses']} misses, "
+            f"{cache_stats['duplicates_suppressed']} duplicates suppressed"
+        )
+
+        for i, result in enumerate(results):
+            result['processed_at'] = datetime.now().isoformat()
+            analysis = _cache_analysis_payload(result)
+            print(
+                f"\n  [{i+1}/{len(results)}] {result.get('cache_status', 'miss').upper()} "
+                f"@{result.get('author', 'unknown')}: {(result.get('text') or '')[:60]}..."
+            )
+            print(f"    → Cache key: {result.get('cache_key')}")
             print(f"    → Folder: {FOLDERS.get(analysis['folder'], analysis['folder'])}")
             print(f"    → Reason: {analysis['reason']}")
             if analysis.get('insights'):
                 print(f"    → Insight: {analysis['insights'][:100]}")
 
-            planned_action = 'delete' if analysis.get('folder') == 'delete' or bookmark.get('deleted') else 'move'
+            planned_action = 'delete' if analysis.get('folder') == 'delete' or result.get('deleted') else 'move'
             result['planned_action'] = planned_action
             result['planned_folder_name'] = _folder_name_for_key(analysis.get('folder'))
 
@@ -1133,7 +1326,7 @@ async def process_bookmarks(dry_run=True, max_bookmarks=20):
                     'action': planned_action,
                     'status': 'skipped',
                     'reason': 'dry-run',
-                    'tweet_id': str(bookmark.get('id') or ''),
+                    'tweet_id': str(result.get('id') or ''),
                     'folder_name': result['planned_folder_name'],
                 }
             else:
@@ -1149,7 +1342,11 @@ async def process_bookmarks(dry_run=True, max_bookmarks=20):
         # Summary report
         summary = {
             'total_processed': len(results),
+            'raw_bookmarks_seen': len(bookmarks),
+            'input_bookmarks_considered': len(target_bookmarks),
             'dry_run': dry_run,
+            'dedupe_cache': analysis_run['cache_stats'],
+            'duplicate_bookmarks': analysis_run['duplicates'],
             'action_summary': summarize_action_results(action_results),
             'by_folder': {},
             'insights': [],
@@ -1228,7 +1425,12 @@ async def process_bookmarks(dry_run=True, max_bookmarks=20):
         print("\n" + "="*60)
         print("PROCESSING SUMMARY")
         print("="*60)
-        print(f"\nTotal bookmarks analyzed: {len(results)}")
+        print(f"\nTotal bookmarks fetched: {len(bookmarks)}")
+        print(f"Total bookmarks analyzed: {len(results)}")
+        print("\nDedupe/cache:")
+        print(f"  hits: {summary['dedupe_cache']['hits']}")
+        print(f"  misses: {summary['dedupe_cache']['misses']}")
+        print(f"  duplicates_suppressed: {summary['dedupe_cache']['duplicates_suppressed']}")
         print("\nBy folder:")
         for folder, count in sorted(summary['by_folder'].items(), key=lambda x: -x[1]):
             print(f"  {FOLDERS.get(folder, folder)}: {count}")
