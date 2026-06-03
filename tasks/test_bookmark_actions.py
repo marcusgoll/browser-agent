@@ -2,7 +2,9 @@
 """Deterministic tests for X bookmark action planning/mutations."""
 
 import asyncio
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -99,6 +101,36 @@ class BookmarkActionTests(unittest.TestCase):
             result = asyncio.run(pb.apply_bookmark_action(page, {"id": "9", "folder": "ai_tools"}, cache))
         self.assertEqual(result["status"], "ok")
         move_mock.assert_awaited_once_with(page, "9", "folder-1", "AI Tools & Agents")
+
+    def test_write_bookmark_outputs_keeps_legacy_files_and_adds_versioned_artifact(self):
+        analysis = [{"id": "9", "author": "tester", "folder": "ai_tools", "url": "https://x.com/test/status/9"}]
+        summary = {
+            "total_processed": 1,
+            "dry_run": True,
+            "action_summary": {"ok": 0, "error": 0, "skipped": 1, "by_action": {"move": 1}},
+            "by_folder": {"ai_tools": 1},
+            "insights": [],
+            "action_items": [],
+            "edge_case_counts": {},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            written = pb.write_bookmark_outputs(
+                results=analysis,
+                summary=summary,
+                output_dir=Path(tmpdir),
+                timestamp="20260531_090410",
+                generated_at="2026-05-31T09:04:10",
+            )
+            legacy_analysis = Path(written["analysis"])
+            legacy_summary = Path(written["summary"])
+            artifact_path = Path(written["artifact"])
+
+            self.assertEqual(json.loads(legacy_analysis.read_text()), analysis)
+            self.assertEqual(json.loads(legacy_summary.read_text()), summary)
+            artifact = json.loads(artifact_path.read_text())
+            self.assertEqual(artifact["schema_version"], pb.bookmark_schema.CURRENT_SCHEMA_VERSION)
+            self.assertEqual(artifact["artifact_type"], "bookmark_run")
+            self.assertEqual(artifact["data"], {"summary": summary, "analysis": analysis})
 
 
 if __name__ == "__main__":

@@ -34,6 +34,8 @@ from playwright.async_api import async_playwright
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 
+import bookmark_schema
+
 PROFILE_DIR = os.environ.get("BROWSER_PROFILE_DIR", "/app/profiles")
 OUTPUT_DIR = Path("/app/output")
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -907,6 +909,37 @@ def summarize_action_results(action_results):
     return summary
 
 
+def write_bookmark_outputs(results, summary, output_dir=OUTPUT_DIR, timestamp=None, generated_at=None):
+    """Write legacy analysis/summary files plus the canonical versioned run artifact."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    timestamp = timestamp or datetime.now().strftime('%Y%m%d_%H%M%S')
+    generated_at = generated_at or datetime.now().isoformat()
+
+    analysis_file = output_dir / f"bookmark_analysis_{timestamp}.json"
+    summary_file = output_dir / f"bookmark_summary_{timestamp}.json"
+    artifact_file = output_dir / f"bookmark_artifact_{timestamp}.json"
+
+    with open(analysis_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    with open(summary_file, 'w') as f:
+        json.dump(summary, f, indent=2)
+
+    artifact = bookmark_schema.build_bookmark_run_artifact(
+        summary=summary,
+        analysis=results,
+        generated_at=generated_at,
+    )
+    with open(artifact_file, 'w') as f:
+        json.dump(artifact, f, indent=2)
+
+    return {
+        'analysis': str(analysis_file),
+        'summary': str(summary_file),
+        'artifact': str(artifact_file),
+    }
+
+
 def _media_analysis_context(media_items):
     """Compact native X media details for LLM analysis without huge URL payloads."""
     summaries = []
@@ -1113,12 +1146,6 @@ async def process_bookmarks(dry_run=True, max_bookmarks=20):
         # Save results
         print("\n[4/4] Saving results...")
         
-        # Full JSON output
-        output_file = OUTPUT_DIR / f"bookmark_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        print(f"Saved full analysis to: {output_file}")
-        
         # Summary report
         summary = {
             'total_processed': len(results),
@@ -1192,10 +1219,10 @@ async def process_bookmarks(dry_run=True, max_bookmarks=20):
                     'url': r['url']
                 })
         
-        summary_file = OUTPUT_DIR / f"bookmark_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(summary_file, 'w') as f:
-            json.dump(summary, f, indent=2)
-        print(f"Saved summary to: {summary_file}")
+        written_outputs = write_bookmark_outputs(results, summary)
+        print(f"Saved full analysis to: {written_outputs['analysis']}")
+        print(f"Saved summary to: {written_outputs['summary']}")
+        print(f"Saved versioned artifact to: {written_outputs['artifact']}")
         
         # Print summary
         print("\n" + "="*60)

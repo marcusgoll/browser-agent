@@ -1,0 +1,51 @@
+{
+  "total_processed": 2,
+  "dry_run": true,
+  "action_summary": {
+    "ok": 0,
+    "error": 0,
+    "skipped": 2,
+    "by_action": {"move": 2}
+  },
+  "by_folder": {"ai_tools": 2},
+  "insights": [
+    {
+      "author": "0xCodez",
+      "insight": "Advanced Claude usage involves parallel agent teams and git worktrees for isolation.",
+      "url": "https://x.com/0xCodez/status/2060732301672161516"
+    },
+    {
+      "author": "rohit4verse",
+      "insight": "Hermes Agent can maintain skills and persistent memory.",
+      "url": "https://x.com/rohit4verse/status/2060911598248853908"
+    }
+  ],
+  "action_items": [
+    {
+      "author": "0xCodez",
+      "action": "Watch the session and capture the worktree pattern.",
+      "url": "https://x.com/0xCodez/status/2060732301672161516"
+    },
+    {
+      "author": "rohit4verse",
+      "action": "Review guide for autonomous agent architecture.",
+      "url": "https://x.com/rohit4verse/status/2060911598248853908"
+    }
+  ],
+  "edge_case_counts": {
+    "deleted_or_unavailable": 0,
+    "with_external_urls": 0,
+    "with_media": 1,
+    "with_media_alt_text": 1,
+    "with_video": 1,
+    "with_video_best_variant": 1,
+    "with_media_enrichment": 1,
+    "with_successful_media_transcript": 0,
+    "with_media_enrichment_errors": 0,
+    "with_cards": 0,
+    "with_quoted_tweets": 1,
+    "with_link_enrichment": 1,
+    "with_successful_link_enrichment": 0,
+    "with_link_enrichment_errors": 1
+  }
+}
