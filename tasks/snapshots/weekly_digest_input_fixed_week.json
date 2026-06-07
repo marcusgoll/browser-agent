@@ -1,0 +1,183 @@
+{
+  "digest_items": [
+    {
+      "actions": [
+        "Add a checklist for approval-gated agent tasks.",
+        "Add approval checklist.",
+        "Promote approval gates to the wiki."
+      ],
+      "authors": [
+        "agent_builder"
+      ],
+      "content_ideas": [
+        {
+          "angle": "Approval gates as product safety",
+          "audience": "agent operators",
+          "hook": "Your agent should ask before it acts",
+          "proof_point": "Same source appears in routes, tasks, and notes."
+        }
+      ],
+      "folders": [
+        "ai_tools"
+      ],
+      "id": "weekly-digest-item-8e0f9c662b27",
+      "insights": [
+        "Permission gates are durable agent architecture.",
+        "Permission gates make agents safer.",
+        "Use permission gates before adding autonomous execution."
+      ],
+      "priority": 1,
+      "projects": [],
+      "signals": [
+        "action_item",
+        "bookmark_insight",
+        "content_idea",
+        "learning_note",
+        "route:immediate_actions",
+        "route:knowledge_promotions",
+        "task"
+      ],
+      "source_files": [
+        "bookmark_summary_20260531_090410.json",
+        "content_ideas/permission-idea.json",
+        "learning_notes/permission.md",
+        "opportunities/high_roi_tasks_2026-05-31.json",
+        "opportunities/opportunity_router_2026-05-31.json"
+      ],
+      "source_url": "https://x.com/agent_builder/status/1",
+      "top_score": 51,
+      "why": [
+        "Durable concept.",
+        "Executable and relevant.",
+        "High ROI."
+      ]
+    },
+    {
+      "actions": [
+        "Route this bookmark to Hermes follow-up."
+      ],
+      "authors": [
+        "router"
+      ],
+      "content_ideas": [],
+      "folders": [
+        "ai_tools"
+      ],
+      "id": "weekly-digest-item-cce17b3f3861",
+      "insights": [
+        "Memory tooling belongs in the Hermes project lane."
+      ],
+      "priority": null,
+      "projects": [
+        "hermes_agent"
+      ],
+      "signals": [
+        "route:project_routes"
+      ],
+      "source_files": [
+        "opportunities/opportunity_router_2026-05-31.json"
+      ],
+      "source_url": "https://x.com/router/status/9",
+      "top_score": 23,
+      "why": [
+        "Primary route justified by agent memory work."
+      ]
+    },
+    {
+      "actions": [
+        "Review memory store tradeoffs."
+      ],
+      "authors": [
+        "researcher"
+      ],
+      "content_ideas": [],
+      "folders": [
+        "research"
+      ],
+      "id": "weekly-digest-item-aae4d2207171",
+      "insights": [
+        "Compare browser automation memory approaches."
+      ],
+      "priority": null,
+      "projects": [],
+      "signals": [
+        "route:research_queue"
+      ],
+      "source_files": [
+        "opportunities/opportunity_router_2026-05-31.json"
+      ],
+      "source_url": "https://x.com/researcher/status/3",
+      "top_score": 18,
+      "why": [
+        "Useful but lower urgency."
+      ]
+    },
+    {
+      "actions": [],
+      "authors": [
+        "solo_item"
+      ],
+      "content_ideas": [],
+      "folders": [],
+      "id": "weekly-digest-item-7d65ba241070",
+      "insights": [
+        "Keep digest generation lightweight."
+      ],
+      "priority": null,
+      "projects": [],
+      "signals": [
+        "bookmark_insight"
+      ],
+      "source_files": [
+        "bookmark_summary_20260531_090410.json"
+      ],
+      "source_url": "https://x.com/solo_item/status/2",
+      "top_score": 0,
+      "why": []
+    }
+  ],
+  "generated_from": {
+    "output_dir": "<fixture-output-dir>",
+    "source_files": [
+      "bookmark_summary_20260531_090410.json",
+      "content_ideas/permission-idea.json",
+      "learning_notes/permission.md",
+      "opportunities/high_roi_tasks_2026-05-31.json",
+      "opportunities/opportunity_router_2026-05-31.json"
+    ]
+  },
+  "schema_version": "weekly-bookmark-digest-input/v1",
+  "source_counts": {
+    "action_items": 1,
+    "bookmark_insights": 2,
+    "bookmark_summary_runs": 1,
+    "content_ideas": 1,
+    "learning_notes": 1,
+    "route_items": 4,
+    "task_items": 1
+  },
+  "summary": {
+    "action_summary": {
+      "by_action": {
+        "archive": 1,
+        "move": 2
+      },
+      "error": 1,
+      "ok": 3,
+      "skipped": 0
+    },
+    "by_folder": {
+      "ai_tools": 3,
+      "research": 1
+    },
+    "edge_case_counts": {
+      "missing_id": 1
+    },
+    "total_processed": 4
+  },
+  "warnings": [],
+  "week": {
+    "week_end": "2026-06-01",
+    "week_start": "2026-05-25"
+  }
+}

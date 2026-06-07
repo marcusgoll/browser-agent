@@ -68,3 +68,23 @@ def test_render_json_report_is_machine_readable(tmp_path):
     decoded = json.loads(payload)
     assert decoded["summary"]["authenticated"] == 1
     assert decoded["platforms"] == rows
+
+
+def test_render_report_includes_latest_task_run(tmp_path):
+    rows = [{"platform": "x", "normalized_status": "authenticated"}]
+    task_run = {
+        "task_id": "task-123",
+        "status": "completed",
+        "review_state": "approved",
+        "worktree_path": "/tmp/worktree",
+        "proof_bundle_path": "/app/output/runs/task-123/proof.json",
+        "sanitized_run_summary": "Done",
+    }
+
+    report = status.render_report(rows, task_run)
+
+    assert "latest task run:" in report
+    assert "task_id=task-123" in report
+    assert "status=completed" in report
+    assert "proof=/app/output/runs/task-123/proof.json" in report
+    assert "summary=Done" in report

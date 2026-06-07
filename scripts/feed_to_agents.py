@@ -12,12 +12,26 @@ import json
 import glob
 import hashlib
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
 OUTPUT_DIR = Path("/app/output")
 AGENT_TASKS_DIR = Path("/app/output/agent_tasks")
 OPPORTUNITY_DIR = Path("/app/output/opportunities")
+LEARNING_NOTES_DIR = Path("/app/output/learning_notes")
+LEARNING_NOTE_SCHEMA_VERSION = "learning-note/v1"
+LEARNING_NOTE_METADATA_FIELDS = (
+    "schema_version",
+    "id",
+    "source_item_id",
+    "source_url",
+    "author",
+    "project_bucket",
+    "source_section",
+    "generated_on",
+)
+LEARNING_NOTE_DISABLED_VALUES = {"0", "false", "no", "off"}
 
 ACTIVE_PROJECT_KEYWORDS = {
     'hermes': 8, 'agent': 8, 'agents': 8, 'memory': 7, 'context': 7,
@@ -37,6 +51,62 @@ RESEARCH_KEYWORDS = {
 KNOWLEDGE_KEYWORDS = {
     'concept': 4, 'framework': 5, 'layers': 5, 'pattern': 5, 'memory': 5,
     'context': 5, 'knowledge': 5, 'fundamentals': 4, 'architecture': 5,
+}
+
+PROJECT_ROUTE_PRIMARY_MIN_SCORE = 15
+PROJECT_ROUTE_SECONDARY_MIN_SCORE = 10
+PROJECT_ROUTE_MAX_SECONDARIES = 1
+PROJECT_ROUTE_RULES = {
+    'hermes_agent': {
+        'keywords': {
+            'agent': 8, 'agents': 8, 'memory': 7, 'context': 7, 'llm': 6,
+            'codex': 6, 'automation': 6, 'autonomous': 5,
+        },
+        'folders': {'ai_tools': 3, 'coding': 2},
+    },
+    'trading_research': {
+        'keywords': {
+            'trading': 8, 'financial': 7, 'finance': 7, 'stock': 7,
+            'alpaca': 9, 'ross': 9, 'paper': 5, 'theses': 5,
+        },
+        'folders': {'business': 2, 'ai_tools': 1},
+    },
+    'devops_infrastructure': {
+        'keywords': {
+            'devops': 8, 'infrastructure': 8, 'monitoring': 6, 'docker': 6,
+            'deploy': 6, 'server': 5, 'ci': 5, 'security': 5,
+        },
+        'folders': {'devops': 3, 'coding': 1},
+    },
+    'knowledge_base': {
+        'keywords': {
+            'knowledge': 6, 'wiki': 6, 'obsidian': 6, 'concept': 5,
+            'framework': 5, 'layers': 5, 'memory': 5, 'context': 5,
+            'architecture': 5,
+        },
+        'folders': {'ai_tools': 1, 'productivity': 1},
+    },
+    'product_design': {
+        'keywords': {
+            'css': 8, 'ui': 7, 'ux': 7, 'transition': 6, 'transitions': 6,
+            'easing': 6, 'animation': 5, 'interface': 5,
+        },
+        'folders': {'design': 3},
+    },
+    'aviation_ops': {
+        'keywords': {
+            'aviation': 8, 'flying': 8, 'flight': 8, 'faa': 7,
+            'logbook': 7, 'currency': 6, 'credential': 6,
+        },
+        'folders': {'aviation': 3},
+    },
+    'business_ops': {
+        'keywords': {
+            'business': 7, 'entrepreneurship': 7, 'sales': 6, 'marketing': 6,
+            'customer': 5, 'revenue': 5,
+        },
+        'folders': {'business': 3},
+    },
 }
 
 def get_latest_summary():
@@ -66,6 +136,86 @@ def _is_deleted_or_low_value(record):
     action = record.get('action_result') or {}
     return action.get('action') == 'delete' and action.get('status') == 'ok'
 
+
+def _contains_route_keyword(text, keyword):
+    pattern = rf"(?<![A-Za-z0-9_]){re.escape(keyword.lower())}(?![A-Za-z0-9_])"
+    return re.search(pattern, text.lower()) is not None
+
+
+def _project_keyword_matches(text, weights):
+    return [keyword for keyword in weights if _contains_route_keyword(text, keyword)]
+
+
+def _project_route_scores(text, folder=None):
+    scores = []
+    for project, rule in PROJECT_ROUTE_RULES.items():
+        matches = _project_keyword_matches(text, rule['keywords'])
+        if not matches:
+            continue
+        score = sum(rule['keywords'][keyword] for keyword in matches)
+        folder_bonus = (rule.get('folders') or {}).get(str(folder), 0) if folder else 0
+        score += folder_bonus
+        scores.append({
+            'project': project,
+            'score': score,
+            'matched_keywords': sorted(matches),
+            'folder': folder,
+            'folder_bonus': folder_bonus,
+        })
+    return sorted(scores, key=lambda item: (-item['score'], item['project']))
+
+
+def _route_rationale(prefix, route_score):
+    evidence = ", ".join(route_score['matched_keywords'])
+    if route_score.get('folder_bonus'):
+        evidence = f"{evidence}; folder signal {route_score.get('folder')}"
+    return f"{prefix} justified by {evidence}."
+
+
+def build_project_routes(summary, analysis):
+    """Assign optional fixed project buckets without changing opportunity sections."""
+    records = _analysis_by_url(analysis)
+    actions_by_url = {item.get('url'): item.get('action', '') for item in summary.get('action_items', []) if item.get('url')}
+    routes = []
+    for item in summary.get('insights', []):
+        url = item.get('url', '')
+        record = records.get(url, {})
+        if _is_deleted_or_low_value(record):
+            continue
+        insight = item.get('insight', '')
+        action = actions_by_url.get(url, '')
+        if not insight and not action:
+            continue
+        folder = record.get('folder') if record else None
+        route_scores = _project_route_scores(f"{insight} {action}", folder)
+        if not route_scores or route_scores[0]['score'] < PROJECT_ROUTE_PRIMARY_MIN_SCORE:
+            continue
+        primary = route_scores[0]
+        secondary_routes = []
+        for secondary in route_scores[1:]:
+            if len(secondary_routes) >= PROJECT_ROUTE_MAX_SECONDARIES:
+                break
+            if secondary['score'] < PROJECT_ROUTE_SECONDARY_MIN_SCORE:
+                continue
+            secondary_routes.append({
+                'project': secondary['project'],
+                'score': secondary['score'],
+                'why': _route_rationale('secondary route', secondary),
+            })
+        routes.append({
+            'author': item.get('author', 'Unknown'),
+            'insight': insight,
+            'action': action,
+            'url': url,
+            'folder': folder,
+            'project': primary['project'],
+            'route_score': primary['score'],
+            'route_why': _route_rationale('primary route', primary),
+            'secondary_routes': secondary_routes,
+        })
+    return sorted(routes, key=lambda item: (-item['route_score'], item['url']))
+
+
 def _section_item(author, insight, action, url, record, section):
     combined = f"{insight} {action}"
     base_score = _keyword_score(combined, ACTIVE_PROJECT_KEYWORDS)
@@ -83,7 +233,14 @@ def _section_item(author, insight, action, url, record, section):
         score += 3
     if folder in ('business', 'productivity', 'design'):
         score += 1
+    source_item_id = (
+        (record or {}).get('source_item_id')
+        or (record or {}).get('source_id')
+        or (record or {}).get('id')
+        or (record or {}).get('tweet_id')
+    )
     return {
+        'source_item_id': source_item_id,
         'author': author,
         'insight': insight,
         'action': action,
@@ -104,6 +261,7 @@ def build_opportunity_router(summary, analysis, limit_per_section=5):
         'immediate_actions': [],
         'research_queue': [],
         'knowledge_promotions': [],
+        'project_routes': build_project_routes(summary, analysis),
         'skipped': {'deleted_or_low_value': 0, 'unscored': 0},
     }
 
@@ -149,6 +307,162 @@ def build_opportunity_router(summary, analysis, limit_per_section=5):
 def _task_id(item):
     seed = "|".join([item.get('url', ''), item.get('action', ''), item.get('insight', '')])
     return f"x-bookmark-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _canonical_source_id(item):
+    for key in ('canonical_id', 'source_id', 'source_item_id', 'bookmark_id', 'tweet_id', 'id'):
+        value = str(item.get(key) or '').strip()
+        if value:
+            return value
+    source_url = _learning_note_source_url(item)
+    match = re.search(r"/(?:i/web/)?status(?:es)?/(\d+)", source_url)
+    if match:
+        return match.group(1)
+    raise ValueError("learning note requires a canonical source/bookmark id")
+
+
+def _learning_note_id(item):
+    return _canonical_source_id(item)
+
+
+def _learning_note_source_url(item):
+    return str(item.get('source_url') or item.get('url') or '')
+
+
+def _learning_note_project_bucket(item):
+    return str(item.get('project_bucket') or item.get('project') or item.get('folder') or item.get('source_section') or 'unassigned')
+
+
+def _safe_note_filename(source_item_id):
+    safe = ''.join(char if char.isalnum() or char in ('-', '_', '.') else '-' for char in source_item_id).strip('.-')
+    return f"{safe or 'learning-note'}.md"
+
+
+def _one_line(value):
+    return " ".join(str(value or '').split())
+
+
+def _learning_note_front_matter(metadata):
+    lines = ["---"]
+    for key in LEARNING_NOTE_METADATA_FIELDS:
+        lines.append(f"{key}: {json.dumps(str(metadata[key]))}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def parse_learning_note_metadata(content):
+    """Parse round-trippable learning note front matter without a YAML dependency."""
+    lines = content.splitlines()
+    if not lines or lines[0] != "---":
+        raise ValueError("learning note is missing front matter")
+    metadata = {}
+    for line in lines[1:]:
+        if line == "---":
+            break
+        key, sep, raw_value = line.partition(":")
+        if not sep:
+            raise ValueError(f"invalid learning note metadata line: {line}")
+        metadata[key] = json.loads(raw_value.strip())
+    required = list(LEARNING_NOTE_METADATA_FIELDS)
+    missing = [key for key in required if key not in metadata]
+    if missing:
+        raise ValueError(f"learning note metadata missing fields: {', '.join(missing)}")
+    return {key: metadata[key] for key in required}
+
+
+def build_learning_note_artifact(item, generated_on):
+    """Render one concise learning note artifact from a routed bookmark item."""
+    source_item_id = _learning_note_id(item)
+    metadata = {
+        "schema_version": LEARNING_NOTE_SCHEMA_VERSION,
+        "id": source_item_id,
+        "source_item_id": source_item_id,
+        "source_url": _learning_note_source_url(item),
+        "author": str(item.get('author') or 'Unknown'),
+        "project_bucket": _learning_note_project_bucket(item),
+        "source_section": str(item.get('source_section') or 'unassigned'),
+        "generated_on": str(generated_on),
+    }
+    takeaway = _one_line(item.get('insight') or item.get('title') or metadata["source_url"])
+    action = _one_line(item.get('action') or item.get('suggested_action') or 'Review the source and decide whether it belongs in the project notes.')
+    why_now = _one_line(item.get('why') or f"Routed to {metadata['project_bucket']} for review.")
+    title = takeaway[:120] or "Learning note"
+    content = "\n".join([
+        _learning_note_front_matter(metadata),
+        f"# {title}",
+        "",
+        "## Takeaway",
+        takeaway,
+        "",
+        "## Action",
+        action,
+        "",
+        "## Why now",
+        why_now,
+        "",
+        f"Source: {metadata['source_url']}",
+    ]) + "\n"
+    return {
+        "filename": _safe_note_filename(source_item_id),
+        "metadata": metadata,
+        "content": content,
+    }
+
+
+def build_learning_note_artifacts(routed, generated_on):
+    """Render learning note artifacts from the same routed sections used by the opportunity memo."""
+    artifacts = []
+    seen_note_ids = set()
+    for section in ("immediate_actions", "research_queue", "knowledge_promotions"):
+        for item in routed.get(section) or []:
+            note_item = dict(item)
+            note_item.setdefault('source_section', section)
+            note_id = _learning_note_id(note_item)
+            if note_id in seen_note_ids:
+                continue
+            seen_note_ids.add(note_id)
+            artifacts.append(build_learning_note_artifact(note_item, generated_on=generated_on))
+    return artifacts
+
+
+def write_learning_note_artifacts(artifacts, notes_dir):
+    """Persist note artifacts, updating an existing canonical note file instead of duplicating it."""
+    notes_dir = Path(notes_dir)
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    result = {"inserted": 0, "updated": 0, "noop": 0, "files": []}
+    seen_filenames = set()
+    for artifact in artifacts or []:
+        metadata = artifact.get("metadata") or {}
+        source_item_id = str(metadata.get("source_item_id") or metadata.get("id") or "")
+        filename = artifact.get("filename") or _safe_note_filename(source_item_id)
+        if filename in seen_filenames:
+            continue
+        seen_filenames.add(filename)
+        path = notes_dir / filename
+        content = artifact["content"]
+        action = "inserted"
+        if path.exists():
+            action = "noop" if path.read_text(encoding="utf-8") == content else "updated"
+        if action != "noop":
+            path.write_text(content, encoding="utf-8")
+        result[action] += 1
+        result["files"].append(str(path))
+    return result
+
+
+def learning_notes_enabled(environ=None):
+    environ = os.environ if environ is None else environ
+    value = str(environ.get("BOOKMARK_LEARNING_NOTES_ENABLED", "1")).strip().lower()
+    return value not in LEARNING_NOTE_DISABLED_VALUES
+
+
+def write_learning_notes_from_routed(routed, generated_on, notes_dir, enabled=True):
+    """Write learning notes from routed bookmarks, with a rollback switch for the memo-only path."""
+    if not enabled:
+        return {"enabled": False, "artifacts": 0, "inserted": 0, "updated": 0, "noop": 0, "files": []}
+    artifacts = build_learning_note_artifacts(routed, generated_on=generated_on)
+    result = write_learning_note_artifacts(artifacts, notes_dir)
+    return {"enabled": True, "artifacts": len(artifacts), **result}
 
 
 def _task_type_for_section(section):
@@ -286,6 +600,19 @@ def render_opportunity_memo(routed, today):
             lines.append(f"   - why: {item.get('why', '')}")
             lines.append(f"   - source: {item.get('url', '')}")
         lines.append("")
+
+    lines.append("## Project routes")
+    project_routes = routed.get('project_routes') or []
+    if not project_routes:
+        lines.append("- None; no explicit project rule met the routing threshold.")
+    for index, route in enumerate(project_routes, 1):
+        lines.append(f"{index}. primary: {route['project']} score={route['route_score']} @{route['author']}")
+        lines.append(f"   - why: {route.get('route_why', '')}")
+        for secondary in route.get('secondary_routes') or []:
+            lines.append(f"   - secondary: {secondary['project']} score={secondary['score']}")
+            lines.append(f"     - why: {secondary.get('why', '')}")
+        lines.append(f"   - source: {route.get('url', '')}")
+    lines.append("")
     return "\n".join(lines)
 
 def categorize_for_agents(insight, action):
@@ -397,6 +724,12 @@ def generate_agent_tasks():
 
     routed = build_opportunity_router(summary, analysis)
     high_roi_tasks = build_high_roi_task_queue(routed)
+    learning_note_result = write_learning_notes_from_routed(
+        routed,
+        generated_on=today,
+        notes_dir=LEARNING_NOTES_DIR,
+        enabled=learning_notes_enabled(),
+    )
     opportunity_json = OPPORTUNITY_DIR / f"opportunity_router_{today}.json"
     opportunity_memo = OPPORTUNITY_DIR / f"opportunity_memo_{today}.md"
     high_roi_json = OPPORTUNITY_DIR / f"high_roi_tasks_{today}.json"
@@ -420,6 +753,12 @@ def generate_agent_tasks():
     print(f"Opportunity memo: {opportunity_memo}")
     print(f"High-ROI tasks JSON: {high_roi_json}")
     print(f"High-ROI tasks memo: {high_roi_memo}")
+    print(
+        "Learning notes: "
+        f"{learning_note_result['inserted']} inserted, "
+        f"{learning_note_result['updated']} updated, "
+        f"{learning_note_result['noop']} noop"
+    )
     print("\n=== HIGH-ROI OPPORTUNITY MEMO ===")
     print(render_opportunity_memo(routed, today))
     print("\n=== HIGH-ROI TASK QUEUE ===")

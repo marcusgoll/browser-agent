@@ -32,6 +32,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import async_playwright
+from browser_use.llm.litellm import ChatLiteLLM
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 
@@ -72,25 +73,92 @@ FOLDERS = {
     "ideas": "Ideas & Inspiration",
     "productivity": "Productivity & Tools",
     "aviation": "Aviation & Flying",
-    "business": "Business & Entrepreneurship",
+    "business": "Business",
     "archive": "Archive (Processed)",
     "delete": "__DELETE__"
 }
 
 
+def _env_first(*names, default=""):
+    for name in names:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return default
+
+
+def _provider_model_name(provider, model):
+    if model.startswith(f"{provider}/"):
+        return model
+    return f"{provider}/{model}"
+
+
 def get_llm():
-    """Initialize LLM for analysis."""
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise ValueError("OPENROUTER_API_KEY not set")
-    
-    model = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4")
-    return ChatOpenAI(
-        model=model,
-        api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
-        temperature=0.3,
-    )
+    """Initialize an LLM client from the active provider env vars."""
+    provider = _env_first(
+        "LLM_PROVIDER",
+        "HERMES_LLM_PROVIDER",
+        "HERMES_PROVIDER",
+        "HERMES_MODEL_PROVIDER",
+        default="openrouter",
+    ).lower()
+    default_model = {
+        "openrouter": "anthropic/claude-sonnet-4",
+        "anthropic": "claude-sonnet-4",
+        "openai": "gpt-4o-mini",
+        "custom": "gpt-4o-mini",
+        "openai-compatible": "gpt-4o-mini",
+        "endpoint": "gpt-4o-mini",
+    }.get(provider, "anthropic/claude-sonnet-4")
+    model = _env_first("LLM_MODEL", "HERMES_LLM_MODEL", "HERMES_MODEL", default=default_model)
+    temperature = float(_env_first("LLM_TEMPERATURE", "HERMES_LLM_TEMPERATURE", default="0.3"))
+
+    if provider == "openrouter":
+        api_key = _env_first("OPENROUTER_API_KEY", "HERMES_OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY not set")
+        return ChatLiteLLM(
+            model=_provider_model_name("openrouter", model),
+            api_key=api_key,
+            api_base="https://openrouter.ai/api/v1",
+            temperature=temperature,
+        )
+
+    if provider == "anthropic":
+        api_key = _env_first("ANTHROPIC_API_KEY", "HERMES_ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not set")
+        return ChatLiteLLM(
+            model=_provider_model_name("anthropic", model),
+            api_key=api_key,
+            temperature=temperature,
+        )
+
+    if provider == "openai":
+        api_key = _env_first("OPENAI_API_KEY", "HERMES_OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not set")
+        return ChatLiteLLM(
+            model=_provider_model_name("openai", model),
+            api_key=api_key,
+            temperature=temperature,
+        )
+
+    if provider in {"custom", "openai-compatible", "endpoint"}:
+        base_url = _env_first("LLM_BASE_URL", "HERMES_LLM_BASE_URL", "OPENAI_BASE_URL", "HERMES_OPENAI_BASE_URL")
+        if not base_url:
+            raise ValueError("LLM_BASE_URL not set for custom provider")
+        api_key = _env_first("LLM_API_KEY", "HERMES_LLM_API_KEY", "OPENAI_API_KEY", "HERMES_OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("LLM_API_KEY not set for custom provider")
+        return ChatOpenAI(
+            model=model,
+            api_key=lambda: api_key,
+            base_url=base_url,
+            temperature=temperature,
+        )
+
+    raise ValueError(f"Unknown LLM provider: {provider}")
 
 
 def _first_string(value):
@@ -336,11 +404,21 @@ async def fetch_bookmarks_dom_fallback(page, max_scrolls=5):
 
 async def fetch_bookmarks(page, max_scrolls=5):
     """Fetch bookmarked tweets via X GraphQL interception, with DOM fallback."""
+    global X_BEARER_TOKEN
     bookmarks_by_id = {}
+    captured_bearer_token = X_BEARER_TOKEN
 
     async def handle_response(response):
+        nonlocal captured_bearer_token
         if 'Bookmarks?' not in response.url:
             return
+        try:
+            request_headers = getattr(response.request, 'headers', {}) or {}
+            auth_header = request_headers.get('authorization') or request_headers.get('Authorization') or ''
+            if auth_header.lower().startswith('bearer ') and not captured_bearer_token:
+                captured_bearer_token = auth_header.split(' ', 1)[1].strip()
+        except Exception:
+            pass
         try:
             data = await response.json()
         except Exception:
@@ -359,8 +437,12 @@ async def fetch_bookmarks(page, max_scrolls=5):
         await page.wait_for_timeout(2500)
 
     if bookmarks_by_id:
+        if captured_bearer_token and not X_BEARER_TOKEN:
+            X_BEARER_TOKEN = captured_bearer_token
         return list(bookmarks_by_id.values())
 
+    if captured_bearer_token and not X_BEARER_TOKEN:
+        X_BEARER_TOKEN = captured_bearer_token
     return await fetch_bookmarks_dom_fallback(page, max_scrolls=max_scrolls)
 
 
@@ -1191,6 +1273,69 @@ def _bookmark_analysis_context(bookmark):
     return json.dumps(context, indent=2, ensure_ascii=False)
 
 
+def _heuristic_bookmark_analysis(bookmark, reason):
+    """Local fallback when the LLM provider fails."""
+    text = " ".join(
+        str(part or "")
+        for part in [
+            bookmark.get('text', ''),
+            bookmark.get('url', ''),
+            bookmark.get('author', ''),
+            bookmark.get('author_name', ''),
+        ]
+    ).strip()
+    lower = text.lower()
+
+    if not lower or lower.startswith('https://t.co/') or len(lower) < 30:
+        return {
+            "folder": "delete",
+            "reason": f"Heuristic fallback after LLM failure: {reason}",
+            "insights": bookmark.get('text', '')[:100],
+            "actionable": None,
+        }
+
+    scored = []
+    folder_keywords = {
+        "ai_tools": ["claude", "codex", "hermes", "agent", "agents", "llm", "mcp", "prompt", "skill", "worktree", "workflow", "automation", "openrouter", "anthropic", "openai"],
+        "devops": ["docker", "kubernetes", "server", "vps", "devops", "infra", "cloudflare", "tailscale", "fail2ban", "ufw", "deployment", "monitoring", "ssh"],
+        "coding": ["typescript", "javascript", "python", "rust", "react", "frontend", "backend", "api", "graphql", "git", "repo", "code", "programming"],
+        "design": ["design", "ux", "ui", "typography", "animation", "visual", "product design", "figma", "icon", "frontend"],
+        "productivity": ["obsidian", "note", "notes", "knowledge", "memory", "schedule", "kanban", "task", "productivity", "workflow"],
+        "aviation": ["aviation", "pilot", "flying", "checkride", "logbook", "airline", "cfi", "pic", "sic", "flight"],
+        "business": ["business", "startup", "entrepreneur", "marketing", "sales", "revenue", "customers", "newsletter", "side hustle", "wealth"],
+        "ideas": ["idea", "inspiration", "thought", "insight", "lessons", "strategy", "metaphor"],
+    }
+    for folder, keywords in folder_keywords.items():
+        score = sum(2 if keyword in lower else 0 for keyword in keywords)
+        if score:
+            scored.append((score, folder))
+
+    if scored:
+        scored.sort(reverse=True)
+        folder = scored[0][1]
+    else:
+        folder = 'archive'
+
+    insight = bookmark.get('text', '')[:180].strip() or bookmark.get('url', '')
+    actionable_map = {
+        'ai_tools': 'Review the linked agent workflow or skill pack and extract reusable patterns.',
+        'devops': 'Compare the workflow against your current infra and note any hardening or automation ideas.',
+        'coding': 'Check the implementation details or repo and see whether the pattern fits an existing codebase.',
+        'design': 'Evaluate whether the design pattern or UI treatment is worth reusing.',
+        'productivity': 'Decide whether this should become a reusable note, template, or workflow.',
+        'aviation': 'Review for any operational, instructional, or logbook value.',
+        'business': 'Assess whether the idea is actionable as a product, marketing, or revenue lever.',
+        'ideas': 'Capture the core concept in a note and link it to related work.',
+        'archive': None,
+    }
+    return {
+        "folder": folder,
+        "reason": f"Heuristic fallback after LLM failure: {reason}",
+        "insights": insight,
+        "actionable": actionable_map.get(folder),
+    }
+
+
 async def analyze_bookmark(llm, bookmark):
     """Analyze a single bookmark and recommend action."""
     prompt = f"""You are a critical but open-minded curator. Analyze this X bookmark and decide what to do with it.
@@ -1238,12 +1383,7 @@ Be critical but fair. If it's just hype without substance, suggest delete. If it
                 "actionable": None
             }
     except Exception as e:
-        return {
-            "folder": "archive",
-            "reason": f"Analysis error: {e}",
-            "insights": bookmark['text'][:100],
-            "actionable": None
-        }
+        return _heuristic_bookmark_analysis(bookmark, str(e))
 
 
 async def process_bookmarks(dry_run=True, max_bookmarks=20):

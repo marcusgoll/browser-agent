@@ -31,6 +31,41 @@ def test_proof_bundle_metadata_sanitizes_urls_and_records_policy(tmp_path):
     assert metadata["account_context"] == {}
 
 
+def test_proof_bundle_sanitizes_task_summary_and_records_contract_fields(tmp_path):
+    metadata = proof.build_metadata(
+        workflow="task_run",
+        platform="browser_use",
+        profile="default",
+        normalized_status="completed",
+        reason="task_completed",
+        url="about:blank",
+        title="Inspect workflow",
+        action_type="task_run",
+        next_action="none",
+        started_at=100,
+        completed_at=101,
+        item_id="task-123",
+        task_id="task-123",
+        worktree_path="/tmp/worktree",
+        review_state="approved",
+        runner_version="browser-agent-runner-v1",
+        sanitized_run_summary="Run summary with https://example.com/path?secret=1",
+    )
+
+    path = proof.write_metadata(tmp_path, metadata, latest_name="task-run-latest.json")
+    saved = json.loads(path.read_text())
+    latest = json.loads((tmp_path / "task-run-latest.json").read_text())
+
+    assert saved["task_id"] == "task-123"
+    assert saved["item_id"] == "task-123"
+    assert saved["worktree_path"] == "/tmp/worktree"
+    assert saved["review_state"] == "approved"
+    assert saved["runner_version"] == "browser-agent-runner-v1"
+    assert saved["sanitized_run_summary"] == "Run summary with [redacted-url]"
+    assert saved["proof_bundle_path"] == str(path)
+    assert latest["proof_bundle_path"] == str(path)
+
+
 def test_proof_bundle_writes_json_under_output_runs(tmp_path):
     metadata = proof.build_metadata(
         workflow="auth_check",

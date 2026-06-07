@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_PLATFORMS = ["x", "linkedin", "reddit"]
+TASK_LATEST_FILE = "task-run-latest.json"
 ACTION_BY_STATUS = {
     "authenticated": "ready",
     "requires_user": "attended challenge/MFA",
@@ -71,6 +72,11 @@ def load_auth_status(output_dir: str | Path, platforms: list[str] | None = None)
     return rows
 
 
+def load_task_run_status(output_dir: str | Path) -> dict[str, Any] | None:
+    path = Path(output_dir) / TASK_LATEST_FILE
+    return _read_json(path)
+
+
 def summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
     return dict(Counter(row.get("normalized_status", "unknown") for row in rows))
 
@@ -84,9 +90,22 @@ def _format_time(value: Any) -> str:
         return str(value)
 
 
-def render_report(rows: list[dict[str, Any]]) -> str:
+def render_report(rows: list[dict[str, Any]], task_run: dict[str, Any] | None = None) -> str:
     summary = summarize(rows)
     lines = ["browser-agent status", "====================", f"summary: {json.dumps(summary, sort_keys=True)}", ""]
+    if task_run:
+        lines.extend(
+            [
+                "latest task run:",
+                f"  task_id={task_run.get('task_id') or 'unknown'}",
+                f"  status={task_run.get('status') or 'unknown'}",
+                f"  review_state={task_run.get('review_state') or 'unknown'}",
+                f"  worktree={task_run.get('worktree_path') or 'none'}",
+                f"  proof={task_run.get('proof_bundle_path') or task_run.get('proof_bundle') or 'none'}",
+                f"  summary={task_run.get('sanitized_run_summary') or 'not provided'}",
+                "",
+            ]
+        )
     for row in rows:
         status = row.get("normalized_status", "unknown")
         action = ACTION_BY_STATUS.get(status, "manual review")
@@ -103,8 +122,8 @@ def render_report(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_json(rows: list[dict[str, Any]]) -> str:
-    return json.dumps({"summary": summarize(rows), "platforms": rows}, indent=2, sort_keys=True) + "\n"
+def render_json(rows: list[dict[str, Any]], task_run: dict[str, Any] | None = None) -> str:
+    return json.dumps({"summary": summarize(rows), "task_run": task_run, "platforms": rows}, indent=2, sort_keys=True) + "\n"
 
 
 def exit_code(rows: list[dict[str, Any]]) -> int:
@@ -123,7 +142,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     rows = load_auth_status(args.output_dir, args.platforms or DEFAULT_PLATFORMS)
-    print(render_json(rows) if args.json else render_report(rows), end="")
+    task_run = load_task_run_status(args.output_dir)
+    print(render_json(rows, task_run) if args.json else render_report(rows, task_run), end="")
     return 0 if args.no_fail else exit_code(rows)
 
 

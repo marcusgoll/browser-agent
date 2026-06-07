@@ -131,10 +131,20 @@ Security Notes
 
 X Bookmark Processor Safety
 ---------------------------
+The processor is provider-agnostic. Set `LLM_PROVIDER` and `LLM_MODEL` to point it at your Hermes-backed or other LLM endpoint. Supported values include `openrouter`, `anthropic`, `openai`, and `custom` (for OpenAI-compatible `LLM_BASE_URL` endpoints).
+
 The scheduled wrapper is report-only by default:
    /home/orchestrator/.hermes/scripts/x-bookmark-processor.sh
 
 It runs process_bookmarks.py in dry-run mode and reports planned moves/deletes without mutating X bookmarks.
+
+For weekly reporting artifacts:
+   cd /home/orchestrator/repos/local/browser-agent
+   docker compose run --rm browser-agent scripts/weekly_bookmark_digest.py --week-start 2026-05-25 --json
+   docker compose run --rm browser-agent scripts/bookmark_metrics_dashboard.py --metrics output/bookmark_metrics.json --output output/bookmark_metrics.html
+
+Use weekly_bookmark_digest.py to build deterministic digest input for a fixed ISO week.
+Use bookmark_metrics_dashboard.py to render a local HTML report from an emitted metrics JSON file.
 
 Approved execute is intentionally separate:
    X_BOOKMARK_APPROVED_EXECUTE=1 \
@@ -143,6 +153,23 @@ Approved execute is intentionally separate:
    /home/orchestrator/.hermes/scripts/x-bookmark-processor-approved-execute.sh
 
 Do not schedule the approved-execute wrapper. Use it only after reviewing the dry-run report and approving exact scope. X_BEARER_TOKEN is required only for approved move/delete execution and must stay in .env or the process environment, never committed.
+
+Hermes Agent OS Contract
+------------------------
+The shared run contract lives in docs/ops/hermes-agent-os-contract.md.
+
+Use scripts/run_task.py for browser-use task runs that need standardized proof bundles and task records.
+Use scripts/task_worktree_runner.py when the task should run inside an isolated git worktree first.
+It now writes:
+- output/runs/<run_id>/proof.json
+- output/runs/<run_id>/task-run.json
+- latest pointer files at the output root
+
+Task runs should record explicit worktree and review-state metadata when those apply.
+No silent fallbacks: if a task is blocked or degraded, the record must say so.
+
+For screenshot-heavy or UI-heavy artifacts, use scripts/design_review_gate.py before shipping the output.
+It is deterministic and non-LLM.
 
 TikTok Saved/Favorites Processor
 --------------------------------

@@ -28,6 +28,7 @@ SECRET_KEY_PATTERNS = (
 )
 ALLOWED_POLICY_KEYS = {"secrets_policy"}
 SECRETS_POLICY = "visible browser state only; cookies/tokens/storage/passwords/browser databases not inspected"
+RUNNER_VERSION_DEFAULT = "browser-agent-runner-v1"
 
 
 def sanitize_url(url: str) -> str:
@@ -43,6 +44,14 @@ def sanitize_url(url: str) -> str:
 def _safe_part(value: str | None) -> str:
     text = re.sub(r"[^A-Za-z0-9_-]+", "-", value or "").strip("-_")
     return text[:80] or "run"
+
+
+def sanitize_run_summary(summary: str | None) -> str:
+    """Normalize a run summary into a short, non-sensitive single line."""
+    text = str(summary or "")
+    text = re.sub(r"https?://\S+", "[redacted-url]", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:400]
 
 
 def build_run_id(workflow: str, platform: str | None = None, item_id: str | None = None, timestamp: int | None = None) -> str:
@@ -86,6 +95,11 @@ def build_metadata(
     screenshots: dict[str, str] | None = None,
     account_context: dict[str, Any] | None = None,
     item_id: str | None = None,
+    task_id: str | None = None,
+    worktree_path: str | None = None,
+    review_state: str | None = None,
+    runner_version: str | None = None,
+    sanitized_run_summary: str | None = None,
     run_id: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -93,7 +107,7 @@ def build_metadata(
     start = started_at or int(time.time())
     complete = completed_at or int(time.time())
     metadata: dict[str, Any] = {
-        "run_id": run_id or build_run_id(workflow, platform, item_id, complete),
+        "run_id": run_id or build_run_id(workflow, platform, item_id or task_id, complete),
         "workflow": workflow,
         "platform": platform,
         "profile": profile,
@@ -111,6 +125,18 @@ def build_metadata(
     }
     if item_id:
         metadata["item_id"] = item_id
+    if task_id:
+        metadata["task_id"] = task_id
+    elif item_id:
+        metadata["task_id"] = item_id
+    if worktree_path:
+        metadata["worktree_path"] = str(worktree_path)
+    if review_state:
+        metadata["review_state"] = review_state
+    if runner_version:
+        metadata["runner_version"] = runner_version
+    if sanitized_run_summary:
+        metadata["sanitized_run_summary"] = sanitize_run_summary(sanitized_run_summary)
     if extra:
         metadata["extra"] = extra
     assert_no_secret_keys(metadata)
@@ -124,6 +150,8 @@ def write_metadata(output_dir: str | Path, metadata: dict[str, Any], latest_name
     run_dir = base / "runs" / _safe_part(str(metadata["run_id"]))
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / "proof.json"
+    metadata.setdefault("proof_bundle_path", str(path))
+    assert_no_secret_keys(metadata)
     text = json.dumps(metadata, indent=2, sort_keys=True) + "\n"
     path.write_text(text, encoding="utf-8")
     if latest_name:

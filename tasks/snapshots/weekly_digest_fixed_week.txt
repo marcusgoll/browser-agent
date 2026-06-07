@@ -1,0 +1,36 @@
+X BOOKMARK WEEKLY DIGEST
+Week: 2026-05-25 to 2026-06-01
+
+Summary
+- Bookmarks processed: 4
+- Categories: ai_tools (3), research (1)
+- Sources: summaries 1, insights 2, actions 1, routes 4, tasks 1, learning notes 1, content ideas 1
+- Actions: ok 3, errors 1, skipped 0; archive 1, move 2
+- Edge cases: missing_id (1)
+
+Top signals
+1. @agent_builder — Permission gates are durable agent architecture.
+   Action: Add a checklist for approval-gated agent tasks.
+   Why it matters: Durable concept.
+   Signals: action item, bookmark insight, content idea, learning note, immediate action, knowledge promotion, task
+   Score: 51 | Folder: ai_tools
+   Content idea: "Your agent should ask before it acts" for agent operators — Approval gates as product safety
+   Source: https://x.com/agent_builder/status/1
+
+2. @router — Memory tooling belongs in the Hermes project lane.
+   Action: Route this bookmark to Hermes follow-up.
+   Why it matters: Primary route justified by agent memory work.
+   Signals: project route
+   Score: 23 | Folder: ai_tools | Project: hermes_agent
+   Source: https://x.com/router/status/9
+
+3. @researcher — Compare browser automation memory approaches.
+   Action: Review memory store tradeoffs.
+   Why it matters: Useful but lower urgency.
+   Signals: research queue
+   Score: 18 | Folder: research
+   Source: https://x.com/researcher/status/3
+
+4. @solo_item — Keep digest generation lightweight.
+   Signals: bookmark insight
+   Source: https://x.com/solo_item/status/2
