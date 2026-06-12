@@ -12,26 +12,14 @@ import json
 import glob
 import hashlib
 import os
-import re
+import difflib
 from datetime import datetime
 from pathlib import Path
 
 OUTPUT_DIR = Path("/app/output")
 AGENT_TASKS_DIR = Path("/app/output/agent_tasks")
 OPPORTUNITY_DIR = Path("/app/output/opportunities")
-LEARNING_NOTES_DIR = Path("/app/output/learning_notes")
-LEARNING_NOTE_SCHEMA_VERSION = "learning-note/v1"
-LEARNING_NOTE_METADATA_FIELDS = (
-    "schema_version",
-    "id",
-    "source_item_id",
-    "source_url",
-    "author",
-    "project_bucket",
-    "source_section",
-    "generated_on",
-)
-LEARNING_NOTE_DISABLED_VALUES = {"0", "false", "no", "off"}
+CONTENT_IDEAS_DIR = Path("/app/output/content_ideas")
 
 ACTIVE_PROJECT_KEYWORDS = {
     'hermes': 8, 'agent': 8, 'agents': 8, 'memory': 7, 'context': 7,
@@ -51,62 +39,6 @@ RESEARCH_KEYWORDS = {
 KNOWLEDGE_KEYWORDS = {
     'concept': 4, 'framework': 5, 'layers': 5, 'pattern': 5, 'memory': 5,
     'context': 5, 'knowledge': 5, 'fundamentals': 4, 'architecture': 5,
-}
-
-PROJECT_ROUTE_PRIMARY_MIN_SCORE = 15
-PROJECT_ROUTE_SECONDARY_MIN_SCORE = 10
-PROJECT_ROUTE_MAX_SECONDARIES = 1
-PROJECT_ROUTE_RULES = {
-    'hermes_agent': {
-        'keywords': {
-            'agent': 8, 'agents': 8, 'memory': 7, 'context': 7, 'llm': 6,
-            'codex': 6, 'automation': 6, 'autonomous': 5,
-        },
-        'folders': {'ai_tools': 3, 'coding': 2},
-    },
-    'trading_research': {
-        'keywords': {
-            'trading': 8, 'financial': 7, 'finance': 7, 'stock': 7,
-            'alpaca': 9, 'ross': 9, 'paper': 5, 'theses': 5,
-        },
-        'folders': {'business': 2, 'ai_tools': 1},
-    },
-    'devops_infrastructure': {
-        'keywords': {
-            'devops': 8, 'infrastructure': 8, 'monitoring': 6, 'docker': 6,
-            'deploy': 6, 'server': 5, 'ci': 5, 'security': 5,
-        },
-        'folders': {'devops': 3, 'coding': 1},
-    },
-    'knowledge_base': {
-        'keywords': {
-            'knowledge': 6, 'wiki': 6, 'obsidian': 6, 'concept': 5,
-            'framework': 5, 'layers': 5, 'memory': 5, 'context': 5,
-            'architecture': 5,
-        },
-        'folders': {'ai_tools': 1, 'productivity': 1},
-    },
-    'product_design': {
-        'keywords': {
-            'css': 8, 'ui': 7, 'ux': 7, 'transition': 6, 'transitions': 6,
-            'easing': 6, 'animation': 5, 'interface': 5,
-        },
-        'folders': {'design': 3},
-    },
-    'aviation_ops': {
-        'keywords': {
-            'aviation': 8, 'flying': 8, 'flight': 8, 'faa': 7,
-            'logbook': 7, 'currency': 6, 'credential': 6,
-        },
-        'folders': {'aviation': 3},
-    },
-    'business_ops': {
-        'keywords': {
-            'business': 7, 'entrepreneurship': 7, 'sales': 6, 'marketing': 6,
-            'customer': 5, 'revenue': 5,
-        },
-        'folders': {'business': 3},
-    },
 }
 
 def get_latest_summary():
@@ -136,86 +68,6 @@ def _is_deleted_or_low_value(record):
     action = record.get('action_result') or {}
     return action.get('action') == 'delete' and action.get('status') == 'ok'
 
-
-def _contains_route_keyword(text, keyword):
-    pattern = rf"(?<![A-Za-z0-9_]){re.escape(keyword.lower())}(?![A-Za-z0-9_])"
-    return re.search(pattern, text.lower()) is not None
-
-
-def _project_keyword_matches(text, weights):
-    return [keyword for keyword in weights if _contains_route_keyword(text, keyword)]
-
-
-def _project_route_scores(text, folder=None):
-    scores = []
-    for project, rule in PROJECT_ROUTE_RULES.items():
-        matches = _project_keyword_matches(text, rule['keywords'])
-        if not matches:
-            continue
-        score = sum(rule['keywords'][keyword] for keyword in matches)
-        folder_bonus = (rule.get('folders') or {}).get(str(folder), 0) if folder else 0
-        score += folder_bonus
-        scores.append({
-            'project': project,
-            'score': score,
-            'matched_keywords': sorted(matches),
-            'folder': folder,
-            'folder_bonus': folder_bonus,
-        })
-    return sorted(scores, key=lambda item: (-item['score'], item['project']))
-
-
-def _route_rationale(prefix, route_score):
-    evidence = ", ".join(route_score['matched_keywords'])
-    if route_score.get('folder_bonus'):
-        evidence = f"{evidence}; folder signal {route_score.get('folder')}"
-    return f"{prefix} justified by {evidence}."
-
-
-def build_project_routes(summary, analysis):
-    """Assign optional fixed project buckets without changing opportunity sections."""
-    records = _analysis_by_url(analysis)
-    actions_by_url = {item.get('url'): item.get('action', '') for item in summary.get('action_items', []) if item.get('url')}
-    routes = []
-    for item in summary.get('insights', []):
-        url = item.get('url', '')
-        record = records.get(url, {})
-        if _is_deleted_or_low_value(record):
-            continue
-        insight = item.get('insight', '')
-        action = actions_by_url.get(url, '')
-        if not insight and not action:
-            continue
-        folder = record.get('folder') if record else None
-        route_scores = _project_route_scores(f"{insight} {action}", folder)
-        if not route_scores or route_scores[0]['score'] < PROJECT_ROUTE_PRIMARY_MIN_SCORE:
-            continue
-        primary = route_scores[0]
-        secondary_routes = []
-        for secondary in route_scores[1:]:
-            if len(secondary_routes) >= PROJECT_ROUTE_MAX_SECONDARIES:
-                break
-            if secondary['score'] < PROJECT_ROUTE_SECONDARY_MIN_SCORE:
-                continue
-            secondary_routes.append({
-                'project': secondary['project'],
-                'score': secondary['score'],
-                'why': _route_rationale('secondary route', secondary),
-            })
-        routes.append({
-            'author': item.get('author', 'Unknown'),
-            'insight': insight,
-            'action': action,
-            'url': url,
-            'folder': folder,
-            'project': primary['project'],
-            'route_score': primary['score'],
-            'route_why': _route_rationale('primary route', primary),
-            'secondary_routes': secondary_routes,
-        })
-    return sorted(routes, key=lambda item: (-item['route_score'], item['url']))
-
-
 def _section_item(author, insight, action, url, record, section):
     combined = f"{insight} {action}"
     base_score = _keyword_score(combined, ACTIVE_PROJECT_KEYWORDS)
@@ -233,14 +85,7 @@ def _section_item(author, insight, action, url, record, section):
         score += 3
     if folder in ('business', 'productivity', 'design'):
         score += 1
-    source_item_id = (
-        (record or {}).get('source_item_id')
-        or (record or {}).get('source_id')
-        or (record or {}).get('id')
-        or (record or {}).get('tweet_id')
-    )
     return {
-        'source_item_id': source_item_id,
         'author': author,
         'insight': insight,
         'action': action,
@@ -261,7 +106,6 @@ def build_opportunity_router(summary, analysis, limit_per_section=5):
         'immediate_actions': [],
         'research_queue': [],
         'knowledge_promotions': [],
-        'project_routes': build_project_routes(summary, analysis),
         'skipped': {'deleted_or_low_value': 0, 'unscored': 0},
     }
 
@@ -309,160 +153,421 @@ def _task_id(item):
     return f"x-bookmark-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:12]}"
 
 
-def _canonical_source_id(item):
-    for key in ('canonical_id', 'source_id', 'source_item_id', 'bookmark_id', 'tweet_id', 'id'):
-        value = str(item.get(key) or '').strip()
-        if value:
-            return value
-    source_url = _learning_note_source_url(item)
-    match = re.search(r"/(?:i/web/)?status(?:es)?/(\d+)", source_url)
-    if match:
-        return match.group(1)
-    raise ValueError("learning note requires a canonical source/bookmark id")
-
-
-def _learning_note_id(item):
-    return _canonical_source_id(item)
-
-
-def _learning_note_source_url(item):
-    return str(item.get('source_url') or item.get('url') or '')
-
-
-def _learning_note_project_bucket(item):
-    return str(item.get('project_bucket') or item.get('project') or item.get('folder') or item.get('source_section') or 'unassigned')
-
-
-def _safe_note_filename(source_item_id):
-    safe = ''.join(char if char.isalnum() or char in ('-', '_', '.') else '-' for char in source_item_id).strip('.-')
-    return f"{safe or 'learning-note'}.md"
+CONTENT_IDEA_SCHEMA_VERSION = "content-idea/v1"
+CONTENT_IDEA_ARTIFACT_TYPE = "content_idea"
+CONTENT_IDEA_SECTIONS = ("immediate_actions", "research_queue", "knowledge_promotions")
+CONTENT_IDEA_DUPLICATE_REJECT_THRESHOLD = 0.86
+CONTENT_IDEA_DUPLICATE_REVISE_THRESHOLD = 0.72
+CONTENT_IDEA_GENERIC_PHRASES = (
+    "interesting idea",
+    "write a post",
+    "could be useful",
+    "share insights",
+    "thought leadership",
+    "valuable content",
+    "engaging content",
+    "key takeaways",
+)
+CONTENT_IDEA_ROUTER_RATIONALES = (
+    "Relevant to active Hermes/trading/devops work and has an executable next step.",
+    "Potentially useful but should be researched before changing systems.",
+    "Durable concept worth promoting into wiki/skills if still novel after dedupe.",
+)
+CONTENT_IDEA_STOPWORDS = {
+    "about", "after", "agent", "agents", "before", "bookmark", "bookmarks",
+    "browser", "from", "into", "more", "post", "source", "that", "this",
+    "turn", "with", "write", "your",
+}
 
 
 def _one_line(value):
-    return " ".join(str(value or '').split())
+    return " ".join(str(value or "").split())
 
 
-def _learning_note_front_matter(metadata):
-    lines = ["---"]
-    for key in LEARNING_NOTE_METADATA_FIELDS:
-        lines.append(f"{key}: {json.dumps(str(metadata[key]))}")
-    lines.append("---")
-    return "\n".join(lines)
+def _content_source_item_id(item):
+    return str(item.get("id") or item.get("source_item_id") or _task_id(item))
 
 
-def parse_learning_note_metadata(content):
-    """Parse round-trippable learning note front matter without a YAML dependency."""
-    lines = content.splitlines()
-    if not lines or lines[0] != "---":
-        raise ValueError("learning note is missing front matter")
-    metadata = {}
-    for line in lines[1:]:
-        if line == "---":
-            break
-        key, sep, raw_value = line.partition(":")
-        if not sep:
-            raise ValueError(f"invalid learning note metadata line: {line}")
-        metadata[key] = json.loads(raw_value.strip())
-    required = list(LEARNING_NOTE_METADATA_FIELDS)
-    missing = [key for key in required if key not in metadata]
-    if missing:
-        raise ValueError(f"learning note metadata missing fields: {', '.join(missing)}")
-    return {key: metadata[key] for key in required}
+def _content_source_url(item):
+    return str(item.get("source_url") or item.get("url") or "")
 
 
-def build_learning_note_artifact(item, generated_on):
-    """Render one concise learning note artifact from a routed bookmark item."""
-    source_item_id = _learning_note_id(item)
-    metadata = {
-        "schema_version": LEARNING_NOTE_SCHEMA_VERSION,
-        "id": source_item_id,
-        "source_item_id": source_item_id,
-        "source_url": _learning_note_source_url(item),
-        "author": str(item.get('author') or 'Unknown'),
-        "project_bucket": _learning_note_project_bucket(item),
-        "source_section": str(item.get('source_section') or 'unassigned'),
-        "generated_on": str(generated_on),
-    }
-    takeaway = _one_line(item.get('insight') or item.get('title') or metadata["source_url"])
-    action = _one_line(item.get('action') or item.get('suggested_action') or 'Review the source and decide whether it belongs in the project notes.')
-    why_now = _one_line(item.get('why') or f"Routed to {metadata['project_bucket']} for review.")
-    title = takeaway[:120] or "Learning note"
-    content = "\n".join([
-        _learning_note_front_matter(metadata),
-        f"# {title}",
-        "",
-        "## Takeaway",
-        takeaway,
-        "",
-        "## Action",
-        action,
-        "",
-        "## Why now",
-        why_now,
-        "",
-        f"Source: {metadata['source_url']}",
-    ]) + "\n"
+def _content_project_bucket(item):
+    return str(item.get("project_bucket") or item.get("primary_route") or item.get("folder") or item.get("source_section") or "unassigned")
+
+
+def _first_content_text(candidates):
+    for path, value in candidates:
+        text = _one_line(value)
+        if text:
+            return text, path
+    return "", candidates[0][0] if candidates else ""
+
+
+def _is_router_rationale(value):
+    text = _one_line(value).lower()
+    return any(text == rationale.lower() for rationale in CONTENT_IDEA_ROUTER_RATIONALES)
+
+
+def _content_text_with_paths(item):
+    learning_note = item.get("learning_note") or {}
+    reason_codes = " ".join(item.get("reason_codes") or [])
+    insight = _first_content_text([
+        ("insight", item.get("insight")),
+        ("title", item.get("title")),
+        ("learning_note.takeaway", learning_note.get("takeaway")),
+        ("learning_note.summary", learning_note.get("summary")),
+    ])
+    action = _first_content_text([
+        ("action", item.get("action")),
+        ("suggested_action", item.get("suggested_action")),
+        ("learning_note.action", learning_note.get("action")),
+    ])
+    why = _first_content_text([
+        ("why", item.get("why")),
+        ("reason_codes", reason_codes),
+        ("learning_note.why_now", learning_note.get("why_now")),
+    ])
+    if _is_router_rationale(why[0]) and insight[0]:
+        why = insight
+    values = {"insight": insight, "action": action, "why": why}
     return {
-        "filename": _safe_note_filename(source_item_id),
-        "metadata": metadata,
-        "content": content,
+        "parts": {key: value[0] for key, value in values.items()},
+        "paths": {key: value[1] for key, value in values.items()},
     }
 
 
-def build_learning_note_artifacts(routed, generated_on):
-    """Render learning note artifacts from the same routed sections used by the opportunity memo."""
-    artifacts = []
-    seen_note_ids = set()
-    for section in ("immediate_actions", "research_queue", "knowledge_promotions"):
-        for item in routed.get(section) or []:
-            note_item = dict(item)
-            note_item.setdefault('source_section', section)
-            note_id = _learning_note_id(note_item)
-            if note_id in seen_note_ids:
-                continue
-            seen_note_ids.add(note_id)
-            artifacts.append(build_learning_note_artifact(note_item, generated_on=generated_on))
-    return artifacts
+def _content_hash(prefix, parts, length):
+    seed = "|".join(_one_line(part).lower() for part in parts)
+    return f"{prefix}-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:length]}"
 
 
-def write_learning_note_artifacts(artifacts, notes_dir):
-    """Persist note artifacts, updating an existing canonical note file instead of duplicating it."""
-    notes_dir = Path(notes_dir)
-    notes_dir.mkdir(parents=True, exist_ok=True)
-    result = {"inserted": 0, "updated": 0, "noop": 0, "files": []}
-    seen_filenames = set()
-    for artifact in artifacts or []:
-        metadata = artifact.get("metadata") or {}
-        source_item_id = str(metadata.get("source_item_id") or metadata.get("id") or "")
-        filename = artifact.get("filename") or _safe_note_filename(source_item_id)
-        if filename in seen_filenames:
+def _content_tokens(value):
+    tokens = []
+    for raw in _one_line(value).lower().split():
+        token = raw.strip(".,:;!?()[]{}\"'")
+        if len(token) > 2 and token not in CONTENT_IDEA_STOPWORDS:
+            tokens.append(token)
+    return tokens
+
+
+def _content_concrete_terms(value):
+    return set(_content_tokens(value))
+
+
+def _grounding(source_paths, evidence_excerpt, grounding_note):
+    excerpt = _one_line(evidence_excerpt)
+    return {
+        "source_paths": list(source_paths) if excerpt else [],
+        "evidence_excerpt": excerpt,
+        "grounding_note": grounding_note if excerpt else "",
+    }
+
+
+def _source_metadata(item):
+    return {
+        "source_item_id": _content_source_item_id(item),
+        "source_url": _content_source_url(item),
+        "source_author": str(item.get("author") or item.get("author_name") or "Unknown"),
+        "source_section": str(item.get("source_section") or "unassigned"),
+        "project_bucket": _content_project_bucket(item),
+        "score": item.get("score", 0),
+        "priority": item.get("priority"),
+        "folder": item.get("folder"),
+    }
+
+
+def _base_content_idea(item, generated_on):
+    source = _source_metadata(item)
+    source_fingerprint = _content_hash(
+        "source",
+        [source["source_item_id"], source["source_url"], source["source_author"]],
+        16,
+    )
+    return {
+        "schema_version": CONTENT_IDEA_SCHEMA_VERSION,
+        "artifact_type": CONTENT_IDEA_ARTIFACT_TYPE,
+        "content_idea_id": "",
+        "generated_on": str(generated_on),
+        "status": "pending_novelty_check",
+        "source_fingerprint": source_fingerprint,
+        "idea_fingerprint": "",
+        "source_metadata": source,
+        "source_material": {},
+        "hook": "",
+        "angle": "",
+        "audience": "",
+        "proof_point": "",
+        "field_grounding": {
+            "hook": _grounding([], "", ""),
+            "angle": _grounding([], "", ""),
+            "audience": _grounding([], "", ""),
+            "proof_point": _grounding([], "", ""),
+        },
+        "novelty_signal": {"status": "not_checked", "reason_codes": [], "nearest_prior_idea_id": None},
+        "duplicate_policy": {
+            "status": "not_checked",
+            "duplicate_score": 0.0,
+            "nearest_prior_idea_id": None,
+            "reason_codes": [],
+        },
+    }
+
+
+def build_content_idea_draft(item, generated_on):
+    """Build a local content-idea/v1 draft from one routed bookmark item.
+
+    The returned draft is intentionally not accepted. It stays
+    ``pending_novelty_check`` until ``build_content_idea_with_checks`` runs the
+    local generic/duplicate gate.
+    """
+    idea = _base_content_idea(item, generated_on)
+    text = _content_text_with_paths(item)
+    parts = text["parts"]
+    paths = text["paths"]
+    source = idea["source_metadata"]
+    idea["source_material"] = {
+        "insight": parts["insight"],
+        "action": parts["action"],
+        "why": parts["why"],
+        "source_url": source["source_url"],
+        "source_author": source["source_author"],
+        "source_section": source["source_section"],
+        "project_bucket": source["project_bucket"],
+    }
+
+    if parts["insight"]:
+        idea["hook"] = f"{parts['insight']}"
+        idea["field_grounding"]["hook"] = _grounding(
+            [paths["insight"]],
+            parts["insight"],
+            "Hook is copied from the routed source takeaway, not invented from a generic prompt.",
+        )
+    if parts["action"]:
+        idea["angle"] = f"Use this as the {source['project_bucket']} operator angle: {parts['action']}"
+        idea["field_grounding"]["angle"] = _grounding(
+            [paths["action"], "project_bucket"],
+            parts["action"],
+            "Angle is anchored to the routed next action and project bucket.",
+        )
+    idea["audience"] = f"{source['project_bucket']} operators reviewing {source['source_section']} bookmarks from @{source['source_author']}"
+    idea["field_grounding"]["audience"] = _grounding(
+        ["project_bucket", "source_section", "source_author"],
+        idea["audience"],
+        "Audience is derived from source metadata only.",
+    )
+    if parts["why"]:
+        idea["proof_point"] = parts["why"]
+        idea["field_grounding"]["proof_point"] = _grounding(
+            [paths["why"]],
+            parts["why"],
+            "Proof point is traceable to routed why/reason evidence; no external claim is added.",
+        )
+
+    idea["idea_fingerprint"] = _content_hash(
+        "idea",
+        [idea["hook"], idea["angle"], idea["audience"], idea["proof_point"]],
+        16,
+    )
+    idea["content_idea_id"] = _content_hash(
+        "content-idea",
+        [idea["source_fingerprint"], idea["idea_fingerprint"]],
+        12,
+    )
+    return idea
+
+
+def _generic_reasons(idea):
+    combined = " ".join([
+        idea.get("hook", ""),
+        idea.get("angle", ""),
+        idea.get("audience", ""),
+        idea.get("proof_point", ""),
+    ]).lower()
+    reasons = [f"generic_phrase.{phrase.replace(' ', '_')}" for phrase in CONTENT_IDEA_GENERIC_PHRASES if phrase in combined]
+    if len(_content_concrete_terms(combined)) < 8:
+        reasons.append("generic.low_source_specificity")
+    return reasons
+
+
+def _weak_evidence_reasons(idea):
+    proof_grounding = idea["field_grounding"]["proof_point"]
+    proof = idea.get("proof_point", "")
+    if not proof_grounding["source_paths"] or len(_content_tokens(proof)) < 6:
+        return ["weak_proof_point"]
+    source_terms = _content_concrete_terms(" ".join(str(v) for v in idea.get("source_material", {}).values()))
+    proof_terms = _content_concrete_terms(proof)
+    if proof_terms and source_terms and len(proof_terms & source_terms) == 0:
+        return ["proof_not_traceable_to_source_material"]
+    return []
+
+
+def _idea_text(idea):
+    return " ".join([idea.get("hook", ""), idea.get("angle", ""), idea.get("audience", ""), idea.get("proof_point", "")])
+
+
+def _token_similarity(left, right):
+    left_tokens = _content_concrete_terms(left)
+    right_tokens = _content_concrete_terms(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _source_backed_delta(candidate, prior):
+    candidate_terms = _content_concrete_terms(candidate.get("proof_point", "") + " " + candidate.get("angle", ""))
+    prior_terms = _content_concrete_terms(prior.get("proof_point", "") + " " + prior.get("angle", ""))
+    return len(candidate_terms - prior_terms) >= 4 and bool(candidate["field_grounding"]["proof_point"]["source_paths"])
+
+
+def _duplicate_policy(candidate, prior_ideas):
+    best = {"score": 0.0, "nearest_prior_idea_id": None, "reason_codes": ["comparison_set_empty"] if not prior_ideas else []}
+    candidate_text = _idea_text(candidate)
+    for prior in prior_ideas or []:
+        if not isinstance(prior, dict):
             continue
-        seen_filenames.add(filename)
-        path = notes_dir / filename
-        content = artifact["content"]
-        action = "inserted"
-        if path.exists():
-            action = "noop" if path.read_text(encoding="utf-8") == content else "updated"
-        if action != "noop":
-            path.write_text(content, encoding="utf-8")
-        result[action] += 1
-        result["files"].append(str(path))
-    return result
+        prior_text = _idea_text(prior)
+        reason_codes = []
+        if candidate.get("idea_fingerprint") and candidate.get("idea_fingerprint") == prior.get("idea_fingerprint"):
+            score = 1.0
+            reason_codes.append("duplicate.exact_idea_fingerprint")
+        elif candidate.get("source_fingerprint") and candidate.get("source_fingerprint") == prior.get("source_fingerprint"):
+            if _source_backed_delta(candidate, prior):
+                score = 0.69
+                reason_codes.extend(["same_source_item", "source_backed_delta"])
+            else:
+                score = 1.0
+                reason_codes.append("duplicate.same_source_item")
+        else:
+            sequence = difflib.SequenceMatcher(None, candidate_text.lower(), prior_text.lower()).ratio() if candidate_text and prior_text else 0.0
+            token_score = _token_similarity(candidate_text, prior_text)
+            score = (0.52 * sequence) + (0.48 * token_score)
+            if token_score >= 0.55 and sequence >= 0.50:
+                score = max(score, 0.74)
+            same_source_url = candidate["source_metadata"].get("source_url") and candidate["source_metadata"].get("source_url") == (prior.get("source_metadata") or {}).get("source_url")
+            if same_source_url:
+                reason_codes.append("same_source_url")
+                score += 0.05
+                if score < CONTENT_IDEA_DUPLICATE_REJECT_THRESHOLD and _source_backed_delta(candidate, prior):
+                    score = min(score, 0.69)
+                    reason_codes.append("source_backed_delta")
+            if token_score >= 0.45:
+                reason_codes.append("token_overlap")
+            if sequence >= 0.72:
+                reason_codes.append("sequence_similarity")
+        if score > best["score"]:
+            best = {
+                "score": min(score, 1.0),
+                "nearest_prior_idea_id": prior.get("content_idea_id"),
+                "reason_codes": reason_codes or ["distinct_material_angle"],
+            }
+    score = round(best["score"], 3)
+    if score >= CONTENT_IDEA_DUPLICATE_REJECT_THRESHOLD:
+        status = "rejected_duplicate"
+    elif score >= CONTENT_IDEA_DUPLICATE_REVISE_THRESHOLD:
+        status = "needs_revision"
+    else:
+        status = "accepted"
+        if best["nearest_prior_idea_id"] and "source_backed_delta" not in best["reason_codes"]:
+            best["reason_codes"].append("distinct_material_angle")
+    return {
+        "status": status,
+        "duplicate_score": score,
+        "nearest_prior_idea_id": best["nearest_prior_idea_id"],
+        "reason_codes": best["reason_codes"],
+    }
 
 
-def learning_notes_enabled(environ=None):
-    environ = os.environ if environ is None else environ
-    value = str(environ.get("BOOKMARK_LEARNING_NOTES_ENABLED", "1")).strip().lower()
-    return value not in LEARNING_NOTE_DISABLED_VALUES
+def _set_needs_review_manifest_unavailable(idea):
+    idea["status"] = "needs_review"
+    idea["novelty_signal"] = {
+        "status": "needs_review",
+        "reason_codes": ["manifest_unavailable"],
+        "nearest_prior_idea_id": None,
+    }
+    idea["duplicate_policy"] = {
+        "status": "not_checked",
+        "duplicate_score": 0.0,
+        "nearest_prior_idea_id": None,
+        "reason_codes": ["manifest_unavailable"],
+    }
+    return idea
 
 
-def write_learning_notes_from_routed(routed, generated_on, notes_dir, enabled=True):
-    """Write learning notes from routed bookmarks, with a rollback switch for the memo-only path."""
+def build_content_idea_with_checks(item, generated_on, prior_manifest=None):
+    """Build one content idea and run local generic/duplicate checks before acceptance."""
+    idea = build_content_idea_draft(item, generated_on)
+    generic_reasons = _generic_reasons(idea)
+    if generic_reasons:
+        idea["status"] = "rejected_generic"
+        idea["novelty_signal"] = {"status": "reject", "reason_codes": generic_reasons, "nearest_prior_idea_id": None}
+        return idea
+
+    weak_reasons = _weak_evidence_reasons(idea)
+    if weak_reasons:
+        idea["status"] = "rejected_weak_evidence"
+        idea["novelty_signal"] = {"status": "reject", "reason_codes": weak_reasons, "nearest_prior_idea_id": None}
+        return idea
+
+    duplicate = _duplicate_policy(idea, list(prior_manifest or []))
+    idea["duplicate_policy"] = duplicate
+    if duplicate["status"] == "rejected_duplicate":
+        idea["status"] = "rejected_duplicate"
+        novelty_status = "reject"
+    elif duplicate["status"] == "needs_revision":
+        idea["status"] = "needs_revision"
+        novelty_status = "revise"
+    else:
+        idea["status"] = "accepted"
+        novelty_status = "accept"
+    idea["novelty_signal"] = {
+        "status": novelty_status,
+        "reason_codes": duplicate["reason_codes"],
+        "nearest_prior_idea_id": duplicate["nearest_prior_idea_id"],
+        "duplicate_score": duplicate["duplicate_score"],
+    }
+    return idea
+
+
+def _load_prior_content_ideas(prior_manifest=None, prior_manifest_path=None):
+    if prior_manifest_path:
+        try:
+            loaded = json.loads(Path(prior_manifest_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None, "manifest_unavailable"
+        if isinstance(loaded, dict) and isinstance(loaded.get("ideas"), list):
+            return loaded["ideas"], None
+        if isinstance(loaded, list):
+            return loaded, None
+        return None, "manifest_unavailable"
+    if prior_manifest is None:
+        return None, "manifest_unavailable"
+    if isinstance(prior_manifest, list):
+        return prior_manifest, None
+    if isinstance(prior_manifest, dict) and isinstance(prior_manifest.get("ideas"), list):
+        return prior_manifest["ideas"], None
+    return None, "manifest_unavailable"
+
+
+def build_content_idea_artifacts(routed, generated_on, prior_manifest=None, prior_manifest_path=None, enabled=True):
+    """Generate checked content ideas from router output without mutating the route payload."""
     if not enabled:
-        return {"enabled": False, "artifacts": 0, "inserted": 0, "updated": 0, "noop": 0, "files": []}
-    artifacts = build_learning_note_artifacts(routed, generated_on=generated_on)
-    result = write_learning_note_artifacts(artifacts, notes_dir)
-    return {"enabled": True, "artifacts": len(artifacts), **result}
+        return []
+    prior_ideas, manifest_error = _load_prior_content_ideas(prior_manifest=prior_manifest, prior_manifest_path=prior_manifest_path)
+    ideas = []
+    accepted_prior = list(prior_ideas or [])
+    for section in CONTENT_IDEA_SECTIONS:
+        for item in routed.get(section, []) or []:
+            idea_item = dict(item)
+            idea_item.setdefault("source_section", section)
+            if manifest_error:
+                idea = _set_needs_review_manifest_unavailable(build_content_idea_draft(idea_item, generated_on))
+            else:
+                idea = build_content_idea_with_checks(idea_item, generated_on=generated_on, prior_manifest=accepted_prior)
+                if idea.get("status") == "accepted":
+                    accepted_prior.append(idea)
+            ideas.append(idea)
+    return ideas
 
 
 def _task_type_for_section(section):
@@ -600,19 +705,6 @@ def render_opportunity_memo(routed, today):
             lines.append(f"   - why: {item.get('why', '')}")
             lines.append(f"   - source: {item.get('url', '')}")
         lines.append("")
-
-    lines.append("## Project routes")
-    project_routes = routed.get('project_routes') or []
-    if not project_routes:
-        lines.append("- None; no explicit project rule met the routing threshold.")
-    for index, route in enumerate(project_routes, 1):
-        lines.append(f"{index}. primary: {route['project']} score={route['route_score']} @{route['author']}")
-        lines.append(f"   - why: {route.get('route_why', '')}")
-        for secondary in route.get('secondary_routes') or []:
-            lines.append(f"   - secondary: {secondary['project']} score={secondary['score']}")
-            lines.append(f"     - why: {secondary.get('why', '')}")
-        lines.append(f"   - source: {route.get('url', '')}")
-    lines.append("")
     return "\n".join(lines)
 
 def categorize_for_agents(insight, action):
@@ -664,6 +756,7 @@ def generate_agent_tasks():
     
     AGENT_TASKS_DIR.mkdir(exist_ok=True)
     OPPORTUNITY_DIR.mkdir(exist_ok=True)
+    CONTENT_IDEAS_DIR.mkdir(exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     
     tasks_by_agent = {
@@ -724,16 +817,19 @@ def generate_agent_tasks():
 
     routed = build_opportunity_router(summary, analysis)
     high_roi_tasks = build_high_roi_task_queue(routed)
-    learning_note_result = write_learning_notes_from_routed(
+    content_idea_generation_enabled = os.getenv("CONTENT_IDEA_GENERATION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    content_idea_prior_manifest = os.getenv("CONTENT_IDEA_PRIOR_MANIFEST") or str(CONTENT_IDEAS_DIR / "prior_content_ideas.json")
+    content_ideas = build_content_idea_artifacts(
         routed,
         generated_on=today,
-        notes_dir=LEARNING_NOTES_DIR,
-        enabled=learning_notes_enabled(),
+        prior_manifest_path=content_idea_prior_manifest,
+        enabled=content_idea_generation_enabled,
     )
     opportunity_json = OPPORTUNITY_DIR / f"opportunity_router_{today}.json"
     opportunity_memo = OPPORTUNITY_DIR / f"opportunity_memo_{today}.md"
     high_roi_json = OPPORTUNITY_DIR / f"high_roi_tasks_{today}.json"
     high_roi_memo = OPPORTUNITY_DIR / f"high_roi_tasks_{today}.md"
+    content_ideas_json = CONTENT_IDEAS_DIR / f"content_ideas_{today}.json"
     with open(opportunity_json, 'w') as f:
         json.dump(routed, f, indent=2)
     with open(opportunity_memo, 'w') as f:
@@ -747,18 +843,25 @@ def generate_agent_tasks():
         }, f, indent=2)
     with open(high_roi_memo, 'w') as f:
         f.write(render_high_roi_task_list(high_roi_tasks, today))
+    if content_idea_generation_enabled:
+        with open(content_ideas_json, 'w') as f:
+            json.dump({
+                'schema_version': 'content-idea-manifest/v1',
+                'generated': today,
+                'source': str(opportunity_json),
+                'ideas': content_ideas,
+                'rollback': {'CONTENT_IDEA_GENERATION_ENABLED': '0 disables this content-idea output while preserving routing'},
+            }, f, indent=2)
     
     print(f"\nMaster feed: {feed_file}")
     print(f"Opportunity JSON: {opportunity_json}")
     print(f"Opportunity memo: {opportunity_memo}")
     print(f"High-ROI tasks JSON: {high_roi_json}")
     print(f"High-ROI tasks memo: {high_roi_memo}")
-    print(
-        "Learning notes: "
-        f"{learning_note_result['inserted']} inserted, "
-        f"{learning_note_result['updated']} updated, "
-        f"{learning_note_result['noop']} noop"
-    )
+    if content_idea_generation_enabled:
+        print(f"Content ideas JSON: {content_ideas_json}")
+    else:
+        print("Content idea generation disabled by CONTENT_IDEA_GENERATION_ENABLED; routing output preserved.")
     print("\n=== HIGH-ROI OPPORTUNITY MEMO ===")
     print(render_opportunity_memo(routed, today))
     print("\n=== HIGH-ROI TASK QUEUE ===")
