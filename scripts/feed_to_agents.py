@@ -13,6 +13,7 @@ import glob
 import hashlib
 import os
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,7 @@ LEARNING_NOTE_METADATA_FIELDS = (
     "generated_on",
 )
 LEARNING_NOTE_DISABLED_VALUES = {"0", "false", "no", "off"}
+CONTENT_IDEA_SCHEMA_VERSION = "content-idea/v1"
 
 ACTIVE_PROJECT_KEYWORDS = {
     'hermes': 8, 'agent': 8, 'agents': 8, 'memory': 7, 'context': 7,
@@ -172,10 +174,29 @@ def _route_rationale(prefix, route_score):
     return f"{prefix} justified by {evidence}."
 
 
-def build_project_routes(summary, analysis):
+def _opportunity_by_url(routed):
+    """Map each routed URL to its highest-ranked existing opportunity item."""
+    opportunities = {}
+    for section in ('immediate_actions', 'research_queue', 'knowledge_promotions'):
+        for item in routed.get(section) or []:
+            url = item.get('url')
+            if not url:
+                continue
+            score = int(item.get('score') or 0)
+            prior = opportunities.get(url)
+            if prior is None or score > prior['score']:
+                opportunities[url] = {
+                    'score': score,
+                    'why': item.get('why', ''),
+                }
+    return opportunities
+
+
+def build_project_routes(summary, analysis, opportunity_by_url=None, limit=20):
     """Assign optional fixed project buckets without changing opportunity sections."""
     records = _analysis_by_url(analysis)
     actions_by_url = {item.get('url'): item.get('action', '') for item in summary.get('action_items', []) if item.get('url')}
+    opportunity_by_url = opportunity_by_url or {}
     routes = []
     for item in summary.get('insights', []):
         url = item.get('url', '')
@@ -202,6 +223,7 @@ def build_project_routes(summary, analysis):
                 'score': secondary['score'],
                 'why': _route_rationale('secondary route', secondary),
             })
+        opportunity = opportunity_by_url.get(url) or {}
         routes.append({
             'author': item.get('author', 'Unknown'),
             'insight': insight,
@@ -211,9 +233,14 @@ def build_project_routes(summary, analysis):
             'project': primary['project'],
             'route_score': primary['score'],
             'route_why': _route_rationale('primary route', primary),
+            'opportunity_score': int(opportunity.get('score') or 0),
+            'opportunity_why': opportunity.get('why', ''),
             'secondary_routes': secondary_routes,
         })
-    return sorted(routes, key=lambda item: (-item['route_score'], item['url']))
+    return sorted(
+        routes,
+        key=lambda item: (-item['opportunity_score'], -item['route_score'], item['url']),
+    )[:limit]
 
 
 def _section_item(author, insight, action, url, record, section):
@@ -261,7 +288,6 @@ def build_opportunity_router(summary, analysis, limit_per_section=5):
         'immediate_actions': [],
         'research_queue': [],
         'knowledge_promotions': [],
-        'project_routes': build_project_routes(summary, analysis),
         'skipped': {'deleted_or_low_value': 0, 'unscored': 0},
     }
 
@@ -301,6 +327,7 @@ def build_opportunity_router(summary, analysis, limit_per_section=5):
         if not routed[section]:
             routed[section] = fallback_items[:limit_per_section]
         routed[section] = sorted(routed[section], key=lambda item: item['score'], reverse=True)[:limit_per_section]
+    routed['project_routes'] = build_project_routes(summary, analysis, _opportunity_by_url(routed))
     return routed
 
 
@@ -309,24 +336,21 @@ def _task_id(item):
     return f"x-bookmark-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:12]}"
 
 
-def _canonical_source_id(item):
-    for key in ('canonical_id', 'source_id', 'source_item_id', 'bookmark_id', 'tweet_id', 'id'):
+def _learning_note_id(item):
+    for key in ('source_item_id', 'bookmark_id', 'id', '_task_id'):
         value = str(item.get(key) or '').strip()
         if value:
             return value
-    source_url = _learning_note_source_url(item)
-    match = re.search(r"/(?:i/web/)?status(?:es)?/(\d+)", source_url)
-    if match:
-        return match.group(1)
-    raise ValueError("learning note requires a canonical source/bookmark id")
-
-
-def _learning_note_id(item):
-    return _canonical_source_id(item)
+    raise ValueError("learning note requires a source_item_id, bookmark_id, id, or _task_id")
 
 
 def _learning_note_source_url(item):
-    return str(item.get('source_url') or item.get('url') or '')
+    source_url = str(item.get('source_url') or item.get('url') or '').strip()
+    if not source_url:
+        raise ValueError("learning note requires a source_url or url")
+    if not re.match(r"^https?://", source_url):
+        raise ValueError("learning note source_url must be an http(s) URL")
+    return source_url
 
 
 def _learning_note_project_bucket(item):
@@ -425,20 +449,71 @@ def build_learning_note_artifacts(routed, generated_on):
     return artifacts
 
 
-def write_learning_note_artifacts(artifacts, notes_dir):
-    """Persist note artifacts, updating an existing canonical note file instead of duplicating it."""
+def _load_existing_learning_note_paths(notes_dir):
+    """Return existing learning note source_item_id values mapped to their files."""
+    notes_dir = Path(notes_dir)
+    existing = {}
+    if not notes_dir.exists():
+        return existing
+    for path in notes_dir.glob("*.md"):
+        try:
+            parsed = parse_learning_note_metadata(path.read_text(encoding="utf-8"))
+            if parsed.get("schema_version") != LEARNING_NOTE_SCHEMA_VERSION:
+                continue
+            source_item_id = str(parsed.get("source_item_id") or parsed.get("id") or "").strip()
+            if source_item_id and source_item_id not in existing:
+                existing[source_item_id] = path
+        except Exception:
+            continue
+    return existing
+
+
+def _load_existing_learning_note_ids(notes_dir):
+    """Return a set of source_item_id values already present in the notes directory."""
+    return set(_load_existing_learning_note_paths(notes_dir))
+
+
+def _available_learning_note_path(notes_dir, filename, reserved_paths):
+    """Choose a note path without overwriting a different note ID that sanitizes alike."""
+    candidate = notes_dir / filename
+    if not candidate.exists() and candidate not in reserved_paths:
+        return candidate
+    parsed = Path(filename)
+    stem = parsed.stem or "learning-note"
+    suffix = parsed.suffix or ".md"
+    index = 2
+    while True:
+        candidate = notes_dir / f"{stem}-{index}{suffix}"
+        if not candidate.exists() and candidate not in reserved_paths:
+            return candidate
+        index += 1
+
+
+def write_learning_note_artifacts(artifacts, notes_dir, skip_existing_ids=None):
+    """Persist note artifacts, updating an existing exact-ID note file instead of duplicating it.
+
+    If skip_existing_ids is provided (a set of source_item_id strings), artifacts whose
+    source_item_id is in the set are suppressed deterministically (counted as suppressed).
+    Distinct source IDs that sanitize to the same filename are assigned suffixed filenames.
+    """
     notes_dir = Path(notes_dir)
     notes_dir.mkdir(parents=True, exist_ok=True)
-    result = {"inserted": 0, "updated": 0, "noop": 0, "files": []}
-    seen_filenames = set()
+    result = {"inserted": 0, "updated": 0, "noop": 0, "suppressed": 0, "files": []}
+    reserved_paths = set()
+    existing_paths_by_id = _load_existing_learning_note_paths(notes_dir)
+    skip_existing_ids = skip_existing_ids or set()
     for artifact in artifacts or []:
         metadata = artifact.get("metadata") or {}
         source_item_id = str(metadata.get("source_item_id") or metadata.get("id") or "")
-        filename = artifact.get("filename") or _safe_note_filename(source_item_id)
-        if filename in seen_filenames:
+        if source_item_id in skip_existing_ids:
+            result["suppressed"] += 1
             continue
-        seen_filenames.add(filename)
-        path = notes_dir / filename
+        filename = artifact.get("filename") or _safe_note_filename(source_item_id)
+        path = existing_paths_by_id.get(source_item_id)
+        if path is None:
+            path = _available_learning_note_path(notes_dir, filename, reserved_paths)
+            existing_paths_by_id[source_item_id] = path
+        reserved_paths.add(path)
         content = artifact["content"]
         action = "inserted"
         if path.exists():
@@ -457,12 +532,322 @@ def learning_notes_enabled(environ=None):
 
 
 def write_learning_notes_from_routed(routed, generated_on, notes_dir, enabled=True):
-    """Write learning notes from routed bookmarks, with a rollback switch for the memo-only path."""
+    """Write learning notes from routed bookmarks, with a rollback switch for the memo-only path.
+
+    Suppresses duplicates deterministically across repeated runs by checking already-written
+    note files on disk for the same source_item_id before building new filenames.
+    """
     if not enabled:
-        return {"enabled": False, "artifacts": 0, "inserted": 0, "updated": 0, "noop": 0, "files": []}
+        return {"enabled": False, "artifacts": 0, "inserted": 0, "updated": 0, "noop": 0, "suppressed": 0, "files": []}
+    existing_ids = _load_existing_learning_note_ids(notes_dir)
     artifacts = build_learning_note_artifacts(routed, generated_on=generated_on)
-    result = write_learning_note_artifacts(artifacts, notes_dir)
+    result = write_learning_note_artifacts(artifacts, notes_dir, skip_existing_ids=existing_ids)
     return {"enabled": True, "artifacts": len(artifacts), **result}
+
+
+CONTENT_IDEA_SECTIONS = ("immediate_actions", "research_queue", "knowledge_promotions")
+CONTENT_IDEA_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "because", "before", "by", "for",
+    "from", "in", "into", "is", "it", "more", "of", "on", "or", "the", "this", "to",
+    "use", "with",
+}
+CONTENT_IDEA_GENERIC_PHRASES = {
+    "interesting idea",
+    "write a post",
+    "could be useful",
+    "maybe useful",
+    "save for later",
+    "product polish",
+}
+
+
+def _content_idea_text(value):
+    return " ".join(str(value or "").split())
+
+
+def _content_idea_normalize(value):
+    text = unicodedata.normalize("NFKC", _content_idea_text(value)).lower()
+    text = re.sub(r"[^\w\s./+-]", " ", text)
+    return " ".join(text.split())
+
+
+def _content_idea_tokens(value):
+    return {
+        token
+        for token in _content_idea_normalize(value).replace("/", " ").split()
+        if token and token not in CONTENT_IDEA_STOPWORDS
+    }
+
+
+def _content_idea_jaccard(left, right):
+    left_tokens = _content_idea_tokens(left)
+    right_tokens = _content_idea_tokens(right)
+    if not left_tokens and not right_tokens:
+        return 1.0
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _content_idea_field(item, field, learning_note_field=None, fallback_field=None):
+    value = _content_idea_text(item.get(field))
+    if value:
+        return value, field
+    if fallback_field:
+        value = _content_idea_text(item.get(fallback_field))
+        if value:
+            return value, fallback_field
+    learning_note = item.get("learning_note") or {}
+    if learning_note_field:
+        value = _content_idea_text(learning_note.get(learning_note_field))
+        if value:
+            return value, f"learning_note.{learning_note_field}"
+    return "", field
+
+
+def _content_idea_source_material(item):
+    insight, insight_path = _content_idea_field(item, "insight", "takeaway")
+    if not insight:
+        insight, insight_path = _content_idea_field(item, "insight", "summary")
+    action, action_path = _content_idea_field(item, "action", "action", "suggested_action")
+    why, why_path = _content_idea_field(item, "why", "why_now")
+    if not why:
+        reason_codes = item.get("reason_codes") or []
+        if reason_codes:
+            why = "; ".join(str(code) for code in reason_codes)
+            why_path = "reason_codes"
+    return {
+        "insight": insight,
+        "action": action,
+        "why": why,
+        "url": _content_idea_text(item.get("source_url") or item.get("url")),
+        "author": _content_idea_text(item.get("author") or item.get("author_name") or "Unknown"),
+        "source_section": _content_idea_text(item.get("source_section")),
+        "project_bucket": _content_idea_text(
+            item.get("project_bucket") or item.get("project") or item.get("folder") or item.get("primary_route") or "unassigned"
+        ),
+        "paths": {"insight": insight_path, "action": action_path, "why": why_path},
+    }
+
+
+def _content_idea_source_id(item, material):
+    for key in ("source_item_id", "id", "bookmark_id", "source_id", "_task_id"):
+        value = _content_idea_text(item.get(key))
+        if value:
+            return value
+    return _task_id({
+        "url": material["url"],
+        "action": material["action"],
+        "insight": material["insight"],
+    })
+
+
+def _content_idea_base_result(item, generated_on, material, source_item_id):
+    action_for_hook = material["action"].lower().rstrip(".!?")
+    hook = (
+        f"Before {action_for_hook}., notice this source-specific constraint: {material['insight']}"
+        if material["insight"] and material["action"]
+        else ""
+    )
+    angle = (
+        f"Use the {material['project_bucket']} angle to turn the bookmark into a concrete operator decision: {material['action']}"
+        if material["action"]
+        else ""
+    )
+    audience = (
+        f"{material['project_bucket']} operators reviewing {material['source_section'] or 'routed'} bookmarks from @{material['author']}"
+    )
+    proof_point = material["why"]
+    return {
+        "schema_version": CONTENT_IDEA_SCHEMA_VERSION,
+        "artifact_type": "content_idea",
+        "content_idea_id": "",
+        "generated_on": generated_on,
+        "status": "accepted",
+        "source_item_id": source_item_id,
+        "source_url": material["url"],
+        "source_author": material["author"],
+        "source_section": material["source_section"],
+        "project_bucket": material["project_bucket"],
+        "score": item.get("score", 0),
+        "hook": hook,
+        "angle": angle,
+        "audience": audience,
+        "proof_point": proof_point,
+        "source_material": {key: material[key] for key in ("insight", "action", "why", "url", "author", "source_section", "project_bucket")},
+        "field_grounding": {
+            "hook": {
+                "source_paths": [material["paths"]["insight"]],
+                "evidence_excerpt": material["insight"],
+                "grounding_note": "Hook preserves the source-derived takeaway instead of inventing a generic prompt.",
+            },
+            "angle": {
+                "source_paths": [material["paths"]["action"], "project_bucket"],
+                "evidence_excerpt": material["action"],
+                "grounding_note": "Angle is anchored to the existing operator action and project context.",
+            },
+            "audience": {
+                "source_paths": ["project_bucket", "source_section", "author"],
+                "evidence_excerpt": audience,
+                "grounding_note": "Audience is derived only from routed project context and source attribution.",
+            },
+            "proof_point": {
+                "source_paths": [material["paths"]["why"]],
+                "evidence_excerpt": proof_point,
+                "grounding_note": "Proof point uses router/scorer evidence; no external claim is added.",
+            },
+        },
+        "novelty_check": {
+            "status": "accept",
+            "novelty_score": 1.0,
+            "duplicate_score": 0.0,
+            "generic_score": 0.0,
+            "reason_codes": [],
+            "nearest_prior_idea_id": None,
+            "developer_message": "Content idea is source-grounded and distinct from prior ideas.",
+        },
+        "duplicate_policy": {
+            "status": "accepted",
+            "duplicate_score": 0.0,
+            "nearest_prior_idea_id": None,
+            "reason_codes": [],
+        },
+        "rejection_reason": None,
+    }
+
+
+def _content_idea_reject(draft, reason, reason_codes, *, duplicate_score=0.0, generic_score=0.0, nearest_prior_idea_id=None):
+    draft["status"] = "rejected"
+    draft["content_idea_id"] = ""
+    draft["rejection_reason"] = reason
+    novelty_score = max(0.0, 1.0 - max(duplicate_score, generic_score))
+    draft["novelty_check"] = {
+        "status": "reject",
+        "novelty_score": round(novelty_score, 4),
+        "duplicate_score": round(duplicate_score, 4),
+        "generic_score": round(generic_score, 4),
+        "reason_codes": reason_codes,
+        "nearest_prior_idea_id": nearest_prior_idea_id,
+        "developer_message": f"Rejected content idea: {reason}.",
+    }
+    draft["duplicate_policy"] = {
+        "status": "rejected" if duplicate_score >= 0.86 else "accepted",
+        "duplicate_score": round(duplicate_score, 4),
+        "nearest_prior_idea_id": nearest_prior_idea_id,
+        "reason_codes": [code for code in reason_codes if code.startswith("duplicate")],
+    }
+    return draft
+
+
+def _content_idea_generic_score(material):
+    values = [material["insight"], material["action"], material["why"]]
+    generic = 0
+    for value in values:
+        normalized = _content_idea_normalize(value)
+        if not normalized or normalized in CONTENT_IDEA_GENERIC_PHRASES or any(phrase in normalized for phrase in CONTENT_IDEA_GENERIC_PHRASES):
+            generic += 1
+    return generic / len(values)
+
+
+def _content_idea_duplicate_check(draft, prior_ideas, source_item_id):
+    best_score = 0.0
+    best_id = None
+    best_reasons = []
+    candidate_text = " ".join([draft["hook"], draft["angle"], draft["audience"], draft["proof_point"]])
+    for prior in prior_ideas or []:
+        prior_hook = prior.get("hook", "")
+        prior_angle = prior.get("angle", "")
+        prior_text = " ".join(str(prior.get(field) or "") for field in ("hook", "angle", "audience", "proof_point"))
+        reasons = []
+        hook_score = _content_idea_jaccard(draft["hook"], prior_hook)
+        angle_score = _content_idea_jaccard(draft["angle"], prior_angle)
+        aggregate_score = _content_idea_jaccard(candidate_text, prior_text)
+        score = max(hook_score, aggregate_score)
+        if _content_idea_normalize(draft["hook"]) == _content_idea_normalize(prior_hook):
+            score = 1.0
+            reasons.append("duplicate_exact_hook")
+        prior_source_ids = {str(value) for value in prior.get("source_ids") or []}
+        if source_item_id and source_item_id in prior_source_ids and max(angle_score, hook_score, aggregate_score) >= 0.30:
+            score = max(score, 0.9)
+            reasons.append("duplicate_same_source_same_angle")
+        if aggregate_score >= 0.72:
+            score = max(score, aggregate_score)
+            reasons.append("duplicate_high_text_similarity")
+        if score > best_score:
+            best_score = score
+            best_id = prior.get("id")
+            best_reasons = reasons
+    return best_score, best_id, best_reasons
+
+
+def build_content_idea_draft(item, generated_on, prior_ideas=None):
+    """Build one deterministic local content idea draft from a routed bookmark item."""
+    material = _content_idea_source_material(item)
+    source_item_id = _content_idea_source_id(item, material)
+    draft = _content_idea_base_result(item, generated_on, material, source_item_id)
+
+    missing_reason_codes = []
+    if not material["insight"]:
+        missing_reason_codes.append("missing_concrete_hook")
+    if not material["action"]:
+        missing_reason_codes.append("missing_causal_angle")
+    if not material["why"]:
+        missing_reason_codes.append("ungrounded_proof_point")
+    if missing_reason_codes:
+        return _content_idea_reject(
+            draft,
+            "missing_or_ungrounded_proof_point",
+            missing_reason_codes,
+        )
+
+    generic_score = _content_idea_generic_score(material)
+    if generic_score >= 0.70:
+        return _content_idea_reject(
+            draft,
+            "too_generic",
+            ["generic_phrase"],
+            generic_score=generic_score,
+        )
+
+    duplicate_score, nearest_prior_id, duplicate_reasons = _content_idea_duplicate_check(draft, prior_ideas, source_item_id)
+    if duplicate_score >= 0.86:
+        return _content_idea_reject(
+            draft,
+            "duplicate_content_idea",
+            duplicate_reasons or ["duplicate_high_text_similarity"],
+            duplicate_score=duplicate_score,
+            nearest_prior_idea_id=nearest_prior_id,
+        )
+
+    stable_payload = json.dumps(
+        {
+            "source_item_id": source_item_id,
+            "hook": draft["hook"],
+            "angle": draft["angle"],
+            "proof_point": draft["proof_point"],
+        },
+        sort_keys=True,
+    )
+    draft["content_idea_id"] = f"content-idea-{hashlib.sha256(stable_payload.encode('utf-8')).hexdigest()[:12]}"
+    draft["novelty_check"]["duplicate_score"] = round(duplicate_score, 4)
+    draft["novelty_check"]["generic_score"] = round(generic_score, 4)
+    draft["duplicate_policy"]["duplicate_score"] = round(duplicate_score, 4)
+    draft["duplicate_policy"]["nearest_prior_idea_id"] = nearest_prior_id
+    return draft
+
+
+def build_content_idea_artifacts(routed, generated_on, prior_ideas=None, enabled=True):
+    """Build deterministic content idea drafts from eligible opportunity-router sections."""
+    if not enabled:
+        return []
+    artifacts = []
+    for section in CONTENT_IDEA_SECTIONS:
+        for item in routed.get(section, []) or []:
+            draft_item = dict(item)
+            if not draft_item.get("source_section"):
+                draft_item["source_section"] = section
+            artifacts.append(build_content_idea_draft(draft_item, generated_on, prior_ideas=prior_ideas))
+    return artifacts
 
 
 def _task_type_for_section(section):
@@ -607,10 +992,12 @@ def render_opportunity_memo(routed, today):
         lines.append("- None; no explicit project rule met the routing threshold.")
     for index, route in enumerate(project_routes, 1):
         lines.append(f"{index}. primary: {route['project']} score={route['route_score']} @{route['author']}")
-        lines.append(f"   - why: {route.get('route_why', '')}")
+        lines.append(f"   - route: {route.get('route_why', '')}")
+        if route.get('opportunity_why'):
+            lines.append(f"   - opportunity: {route.get('opportunity_why', '')}")
         for secondary in route.get('secondary_routes') or []:
             lines.append(f"   - secondary: {secondary['project']} score={secondary['score']}")
-            lines.append(f"     - why: {secondary.get('why', '')}")
+            lines.append(f"     - route: {secondary.get('why', '')}")
         lines.append(f"   - source: {route.get('url', '')}")
     lines.append("")
     return "\n".join(lines)
