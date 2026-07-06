@@ -122,6 +122,42 @@ class BookmarkMetricsDashboardTests(unittest.TestCase):
         self.assertNotIn("<th scope=\"row\">Processed</th><td>88</td>", html)
         self.assertNotIn("<td>0</td>", html)
 
+    def test_run_summary_omits_stale_run_level_processed_counts(self) -> None:
+        metrics = self.sample_metrics()
+        metrics["counts"]["processed"] = 5
+        metrics["runs"] = [
+            {"id": "stale-run", "status": "completed", "counts": {"processed": 777}},
+        ]
+
+        html = dashboard.render_dashboard(metrics, source_name="stale-run-counts.json")
+
+        self.assertIn("<th scope=\"row\">Processed</th><td>5</td>", html)
+        self.assertIn("stale-run", html)
+        self.assertIn("completed", html)
+        self.assertNotIn("<th scope=\"col\">Processed</th>", html)
+        self.assertNotIn("777", html)
+
+    def test_cli_error_report_sanitizes_absolute_metrics_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            metrics_path = root / "private" / "bookmark_metrics.json"
+            report_path = root / "dashboard.html"
+
+            exit_code = dashboard.main([
+                "--metrics",
+                str(metrics_path),
+                "--output",
+                str(report_path),
+            ])
+
+            self.assertEqual(exit_code, 2)
+            html = report_path.read_text(encoding="utf-8")
+            self.assertIn("Metrics unavailable", html)
+            self.assertIn("bookmark_metrics.json", html)
+            self.assertIn("Input file unavailable", html)
+            self.assertNotIn(str(metrics_path), html)
+            self.assertNotIn(str(metrics_path.parent), html)
+
     def test_dashboard_renders_degraded_state_for_null_counts_object(self) -> None:
         metrics = self.sample_metrics()
         metrics["counts"] = None
