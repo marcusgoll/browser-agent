@@ -166,6 +166,8 @@ class OpportunityRouterTests(unittest.TestCase):
                 "project": "hermes_agent",
                 "route_score": 33,
                 "route_why": "primary route justified by agent, agents, context, memory; folder signal ai_tools.",
+                "opportunity_score": 0,
+                "opportunity_why": "",
                 "secondary_routes": [
                     {
                         "project": "knowledge_base",
@@ -183,6 +185,8 @@ class OpportunityRouterTests(unittest.TestCase):
                 "project": "product_design",
                 "route_score": 36,
                 "route_why": "primary route justified by css, easing, transition, transitions, ui; folder signal design.",
+                "opportunity_score": 0,
+                "opportunity_why": "",
                 "secondary_routes": [],
             },
         }
@@ -220,6 +224,36 @@ class OpportunityRouterTests(unittest.TestCase):
                 self.assertIn("score", secondary)
                 self.assertRegex(secondary.get("why", ""), r"^secondary route justified by .+\.$")
 
+    def test_project_routes_preserve_existing_opportunity_explanations(self):
+        routed = feed.build_opportunity_router(self.sample_summary(), self.sample_analysis())
+
+        routes_by_url = {route["url"]: route for route in routed["project_routes"]}
+        good_ai = routes_by_url["https://x.com/good_ai/status/1"]
+        self.assertEqual(good_ai["opportunity_score"], 52)
+        self.assertEqual(
+            good_ai["opportunity_why"],
+            "Relevant to active Hermes/trading/devops work and has an executable next step.",
+        )
+        self.assertEqual(
+            good_ai["route_why"],
+            "primary route justified by agent, agents, context, memory; folder signal ai_tools.",
+        )
+        for route in routed["project_routes"]:
+            for required_field in (
+                "author",
+                "insight",
+                "action",
+                "url",
+                "folder",
+                "project",
+                "route_score",
+                "route_why",
+                "opportunity_score",
+                "opportunity_why",
+                "secondary_routes",
+            ):
+                self.assertIn(required_field, route)
+
     def test_project_routes_skip_ambiguous_folder_only_and_deleted_items(self):
         routed = feed.build_opportunity_router(self.sample_summary(), self.sample_analysis())
 
@@ -241,6 +275,25 @@ class OpportunityRouterTests(unittest.TestCase):
             for secondary in route.get("secondary_routes", []):
                 self.assertIn(secondary["project"], known_projects)
                 self.assertNotIn("secondary_routes", secondary)
+
+    def test_opportunity_memo_tolerates_missing_or_empty_project_routes(self):
+        routed = feed.build_opportunity_router(self.sample_summary(), self.sample_analysis())
+
+        for project_routes_value in (None, []):
+            with self.subTest(project_routes=project_routes_value):
+                rollback_shape = dict(routed)
+                if project_routes_value is None:
+                    rollback_shape.pop("project_routes", None)
+                else:
+                    rollback_shape["project_routes"] = project_routes_value
+
+                memo = feed.render_opportunity_memo(rollback_shape, "2026-05-23")
+
+                self.assertIn("Immediate executable actions", memo)
+                self.assertIn("Research queue", memo)
+                self.assertIn("Knowledge-base promotions", memo)
+                self.assertIn("Project routes", memo)
+                self.assertIn("- None", memo)
 
 
 if __name__ == "__main__":
