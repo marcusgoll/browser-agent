@@ -159,6 +159,60 @@ class LearningNoteTests(unittest.TestCase):
         self.assertEqual(len(artifacts), 1)
         self.assertEqual(artifacts[0]["metadata"]["id"], "stable-bookmark-123")
 
+    def test_learning_note_artifacts_dedupe_by_canonical_x_status_when_bookmark_id_missing(self):
+        first = self.routed_bookmark(
+            id=None,
+            source_item_id=None,
+            url="https://x.com/good_ai/status/123",
+            source_url="https://x.com/good_ai/status/123",
+        )
+        duplicate = self.routed_bookmark(
+            id=None,
+            source_item_id=None,
+            url="https://x.com/good_ai/status/123?utm_source=rerun",
+            source_url="https://x.com/good_ai/status/123?utm_source=rerun",
+        )
+        routed = {
+            "immediate_actions": [first],
+            "research_queue": [duplicate],
+            "knowledge_promotions": [],
+        }
+
+        artifacts = feed.build_learning_note_artifacts(routed, generated_on="2026-06-03")
+
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["metadata"]["id"], "123")
+
+    def test_learning_note_artifacts_keep_distinct_bookmark_ids_for_same_source_url(self):
+        routed = {
+            "immediate_actions": [
+                self.routed_bookmark(id="bookmark-a", source_url="https://x.com/good_ai/status/123"),
+                self.routed_bookmark(id="bookmark-b", source_url="https://x.com/good_ai/status/123"),
+            ],
+            "research_queue": [],
+            "knowledge_promotions": [],
+        }
+
+        artifacts = feed.build_learning_note_artifacts(routed, generated_on="2026-06-03")
+
+        self.assertEqual(
+            [artifact["metadata"]["id"] for artifact in artifacts],
+            ["bookmark-a", "bookmark-b"],
+        )
+        self.assertEqual(
+            [artifact["filename"] for artifact in artifacts],
+            ["bookmark-a.md", "bookmark-b.md"],
+        )
+
+    def test_learning_notes_enabled_honors_env_rollback_switch(self):
+        for disabled_value in ("0", "false", "no", "off"):
+            with self.subTest(disabled_value=disabled_value):
+                self.assertFalse(
+                    feed.learning_notes_enabled({"BOOKMARK_LEARNING_NOTES_ENABLED": disabled_value})
+                )
+        self.assertTrue(feed.learning_notes_enabled({"BOOKMARK_LEARNING_NOTES_ENABLED": "1"}))
+        self.assertTrue(feed.learning_notes_enabled({}))
+
     def test_learning_note_output_can_be_disabled_without_replacing_opportunity_memo(self):
         routed = {
             "generated_from": "x_bookmark_analysis",
