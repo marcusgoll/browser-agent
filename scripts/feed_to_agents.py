@@ -172,13 +172,34 @@ def _route_rationale(prefix, route_score):
     return f"{prefix} justified by {evidence}."
 
 
-def build_project_routes(summary, analysis):
+def _opportunity_by_url(routed):
+    """Map each routed URL to its highest-ranked existing opportunity item."""
+    opportunities = {}
+    for section in ('immediate_actions', 'research_queue', 'knowledge_promotions'):
+        for item in routed.get(section) or []:
+            url = item.get('url')
+            if not url:
+                continue
+            score = int(item.get('score') or 0)
+            prior = opportunities.get(url)
+            if prior is None or score > prior['score']:
+                opportunities[url] = {
+                    'score': score,
+                    'why': item.get('why', ''),
+                }
+    return opportunities
+
+
+def build_project_routes(summary, analysis, opportunity_by_url=None, limit=20):
     """Assign optional fixed project buckets without changing opportunity sections."""
     records = _analysis_by_url(analysis)
     actions_by_url = {item.get('url'): item.get('action', '') for item in summary.get('action_items', []) if item.get('url')}
+    opportunity_by_url = opportunity_by_url or {}
     routes = []
     for item in summary.get('insights', []):
         url = item.get('url', '')
+        if not url:
+            continue
         record = records.get(url, {})
         if _is_deleted_or_low_value(record):
             continue
@@ -202,6 +223,7 @@ def build_project_routes(summary, analysis):
                 'score': secondary['score'],
                 'why': _route_rationale('secondary route', secondary),
             })
+        opportunity = opportunity_by_url.get(url) or {}
         routes.append({
             'author': item.get('author', 'Unknown'),
             'insight': insight,
@@ -211,9 +233,14 @@ def build_project_routes(summary, analysis):
             'project': primary['project'],
             'route_score': primary['score'],
             'route_why': _route_rationale('primary route', primary),
+            'opportunity_score': int(opportunity.get('score') or 0),
+            'opportunity_why': opportunity.get('why', ''),
             'secondary_routes': secondary_routes,
         })
-    return sorted(routes, key=lambda item: (-item['route_score'], item['url']))
+    return sorted(
+        routes,
+        key=lambda item: (-item['opportunity_score'], -item['route_score'], item['url']),
+    )[:limit]
 
 
 def _section_item(author, insight, action, url, record, section):
@@ -261,7 +288,6 @@ def build_opportunity_router(summary, analysis, limit_per_section=5):
         'immediate_actions': [],
         'research_queue': [],
         'knowledge_promotions': [],
-        'project_routes': build_project_routes(summary, analysis),
         'skipped': {'deleted_or_low_value': 0, 'unscored': 0},
     }
 
@@ -301,6 +327,7 @@ def build_opportunity_router(summary, analysis, limit_per_section=5):
         if not routed[section]:
             routed[section] = fallback_items[:limit_per_section]
         routed[section] = sorted(routed[section], key=lambda item: item['score'], reverse=True)[:limit_per_section]
+    routed['project_routes'] = build_project_routes(summary, analysis, _opportunity_by_url(routed))
     return routed
 
 
@@ -604,12 +631,14 @@ def render_opportunity_memo(routed, today):
     lines.append("## Project routes")
     project_routes = routed.get('project_routes') or []
     if not project_routes:
-        lines.append("- None; no explicit project rule met the routing threshold.")
+        lines.append("- None")
     for index, route in enumerate(project_routes, 1):
-        lines.append(f"{index}. primary: {route['project']} score={route['route_score']} @{route['author']}")
-        lines.append(f"   - why: {route.get('route_why', '')}")
+        lines.append(f"{index}. primary: {route.get('project')} route_score={route.get('route_score', 0)} @{route.get('author', 'Unknown')}")
+        lines.append(f"   - route: {route.get('route_why', '')}")
+        if route.get('opportunity_why'):
+            lines.append(f"   - opportunity: {route.get('opportunity_why', '')}")
         for secondary in route.get('secondary_routes') or []:
-            lines.append(f"   - secondary: {secondary['project']} score={secondary['score']}")
+            lines.append(f"   - secondary: {secondary.get('project')} score={secondary.get('score', 0)}")
             lines.append(f"     - why: {secondary.get('why', '')}")
         lines.append(f"   - source: {route.get('url', '')}")
     lines.append("")
