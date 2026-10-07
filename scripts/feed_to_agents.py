@@ -32,6 +32,12 @@ LEARNING_NOTE_METADATA_FIELDS = (
     "generated_on",
 )
 LEARNING_NOTE_DISABLED_VALUES = {"0", "false", "no", "off"}
+TRIAGE_SCORER_MODE_ENV = "BOOKMARK_TRIAGE_SCORER"
+TRIAGE_SECTION_THRESHOLDS = {
+    "immediate_actions": 12,
+    "research_queue": 10,
+    "knowledge_promotions": 10,
+}
 
 ACTIVE_PROJECT_KEYWORDS = {
     'hermes': 8, 'agent': 8, 'agents': 8, 'memory': 7, 'context': 7,
@@ -239,7 +245,7 @@ def _section_item(author, insight, action, url, record, section):
         or (record or {}).get('id')
         or (record or {}).get('tweet_id')
     )
-    return {
+    item = {
         'source_item_id': source_item_id,
         'author': author,
         'insight': insight,
@@ -249,12 +255,29 @@ def _section_item(author, insight, action, url, record, section):
         'score': score,
         'why': why,
     }
+    if os.environ.get(TRIAGE_SCORER_MODE_ENV, 'deterministic').strip().lower() != 'legacy':
+        threshold = TRIAGE_SECTION_THRESHOLDS[section]
+        reason_codes = []
+        if any(keyword in combined.lower() for keyword in ACTIVE_PROJECT_KEYWORDS):
+            reason_codes.append('active_project:agent')
+        reason_codes.append(f"threshold:{section}:{'met' if score >= threshold else 'missed'}")
+        item.update({
+            'threshold': threshold,
+            'passes_threshold': score >= threshold,
+            'reason_codes': reason_codes,
+            'why': f"{why} Reason codes: {', '.join(reason_codes)}",
+        })
+    return item
 
 def build_opportunity_router(summary, analysis, limit_per_section=5):
     """Rank bookmark insights into concrete high-ROI sections."""
     records = _analysis_by_url(analysis)
     actions_by_url = {item.get('url'): item.get('action', '') for item in summary.get('action_items', []) if item.get('url')}
+    scorer_mode = os.environ.get(TRIAGE_SCORER_MODE_ENV, 'deterministic').strip().lower()
+    if scorer_mode not in {'deterministic', 'legacy'}:
+        scorer_mode = 'deterministic'
     routed = {
+        'triage_scorer': scorer_mode,
         'generated_from': 'x_bookmark_analysis',
         'total_processed': summary.get('total_processed', 0),
         'action_summary': summary.get('action_summary', {}),
@@ -282,11 +305,11 @@ def build_opportunity_router(summary, analysis, limit_per_section=5):
         research = _section_item(author, insight, action, url, record, 'research_queue')
         knowledge = _section_item(author, insight, action, url, record, 'knowledge_promotions')
 
-        if immediate['score'] >= 12 and action:
+        if immediate['score'] >= TRIAGE_SECTION_THRESHOLDS['immediate_actions'] and action:
             routed['immediate_actions'].append(immediate)
-        if research['score'] >= 10:
+        if research['score'] >= TRIAGE_SECTION_THRESHOLDS['research_queue']:
             routed['research_queue'].append(research)
-        if knowledge['score'] >= 10:
+        if knowledge['score'] >= TRIAGE_SECTION_THRESHOLDS['knowledge_promotions']:
             routed['knowledge_promotions'].append(knowledge)
 
     fallback_items = []
