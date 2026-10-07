@@ -9,7 +9,11 @@ set -euo pipefail
 BROWSER_AGENT_WORKDIR="${BROWSER_AGENT_WORKDIR:-/home/orchestrator/browser-agent}"
 cd "$BROWSER_AGENT_WORKDIR"
 
-docker compose run --rm browser-agent scripts/feed_to_agents.py
+run_started_at=$(date +%s)
+
+docker compose run --rm \
+  -e "BOOKMARK_TRIAGE_SCORER=${BOOKMARK_TRIAGE_SCORER:-deterministic}" \
+  browser-agent scripts/feed_to_agents.py
 
 latest_memo=$(find output/opportunities -maxdepth 1 -type f -name 'opportunity_memo_*.md' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)
 latest_tasks=$(find output/opportunities -maxdepth 1 -type f -name 'high_roi_tasks_*.md' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)
@@ -22,6 +26,11 @@ fi
 
 if [[ -z "${latest_tasks:-}" || ! -f "$latest_tasks" ]]; then
   echo "[CRITICAL] No high-ROI task queue generated"
+  exit 1
+fi
+
+if (( $(stat -c %Y "$latest_memo") < run_started_at || $(stat -c %Y "$latest_tasks") < run_started_at )); then
+  echo "[CRITICAL] Generator produced no fresh opportunity artifacts"
   exit 1
 fi
 
