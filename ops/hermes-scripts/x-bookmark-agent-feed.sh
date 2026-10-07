@@ -9,6 +9,8 @@ set -euo pipefail
 BROWSER_AGENT_WORKDIR="${BROWSER_AGENT_WORKDIR:-/home/orchestrator/browser-agent}"
 cd "$BROWSER_AGENT_WORKDIR"
 
+run_started_at=$(date +%s)
+
 docker compose run --rm \
   -e "BOOKMARK_TRIAGE_SCORER=${BOOKMARK_TRIAGE_SCORER:-deterministic}" \
   browser-agent scripts/feed_to_agents.py
@@ -24,6 +26,11 @@ fi
 
 if [[ -z "${latest_tasks:-}" || ! -f "$latest_tasks" ]]; then
   echo "[CRITICAL] No high-ROI task queue generated"
+  exit 1
+fi
+
+if (( $(stat -c %Y "$latest_memo") < run_started_at || $(stat -c %Y "$latest_tasks") < run_started_at )); then
+  echo "[CRITICAL] Generator produced no fresh opportunity artifacts"
   exit 1
 fi
 
