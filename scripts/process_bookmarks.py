@@ -42,7 +42,7 @@ PROFILE_DIR = os.environ.get("BROWSER_PROFILE_DIR", "/app/profiles")
 OUTPUT_DIR = Path("/app/output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 BOOKMARK_ANALYSIS_CACHE_FILE = OUTPUT_DIR / "bookmark_analysis_cache_v1.json"
-BOOKMARK_ANALYSIS_CACHE_VERSION = "bookmark-analysis-cache-v1"
+BOOKMARK_ANALYSIS_CACHE_VERSION = "bookmark-analysis-cache-v2"
 BOOKMARK_ANALYSIS_POLICY_VERSION = "bookmark-analysis-policy-v1"
 FETCH_TIMEOUT_SECONDS = int(os.environ.get("BOOKMARK_LINK_FETCH_TIMEOUT", "8"))
 FETCH_MAX_BYTES = int(os.environ.get("BOOKMARK_LINK_FETCH_MAX_BYTES", str(1024 * 1024)))
@@ -639,6 +639,18 @@ def _bookmark_analysis_policy_signature():
         'provider': provider,
         'model': _env_first("LLM_MODEL", "HERMES_LLM_MODEL", "HERMES_MODEL", default=default_model),
         'temperature': _env_first("LLM_TEMPERATURE", "HERMES_LLM_TEMPERATURE", default="0.3"),
+        'enrichment': {
+            'fetch_timeout_seconds': FETCH_TIMEOUT_SECONDS,
+            'fetch_max_bytes': FETCH_MAX_BYTES,
+            'fetch_snippet_chars': FETCH_SNIPPET_CHARS,
+            'max_enriched_links': MAX_ENRICHED_LINKS_PER_BOOKMARK,
+            'video_transcription_enabled': VIDEO_TRANSCRIPTION_ENABLED,
+            'video_fetch_timeout_seconds': VIDEO_FETCH_TIMEOUT_SECONDS,
+            'video_fetch_max_bytes': VIDEO_FETCH_MAX_BYTES,
+            'video_transcribe_max_seconds': VIDEO_TRANSCRIBE_MAX_SECONDS,
+            'video_transcribe_provider': VIDEO_TRANSCRIBE_PROVIDER,
+            'video_transcribe_model': VIDEO_TRANSCRIBE_MODEL,
+        },
     }
 
 
@@ -681,6 +693,7 @@ def _prepare_bookmark_analysis_cache(cache):
         return cache
 
     cache['version'] = BOOKMARK_ANALYSIS_CACHE_VERSION
+    cache.pop('load_error', None)
     return cache
 
 
