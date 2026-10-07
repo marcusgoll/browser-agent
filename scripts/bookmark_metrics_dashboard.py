@@ -180,7 +180,7 @@ def _safe_error_message(exc: BaseException, source_name: str) -> str:
 
 
 def _redact_absolute_paths(message: str) -> str:
-    return re.sub(r"(?<![\w.-])/(?:[^/\s'\":<>]+/)+([^/\s'\":<>]+)", r"<path:\1>", message)
+    return re.sub(r"(?<![\\w.-])/(?:[^/\\s\'\":<>]+/)*([^/\\s\'\":<>]+)", r"<path:\\1>", message)
 
 
 def _extract_counts(metrics: dict[str, Any]) -> dict[str, Any]:
