@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -117,7 +118,7 @@ def render_error_dashboard(*, source_name: str, title: str, message: str, counts
             "    </header>",
             "    <section aria-labelledby=\"metrics-error\">",
             "      <h2 id=\"metrics-error\">" + _escape(title) + "</h2>",
-            "      <p>" + _escape(message) + "</p>",
+            "      <p>" + _escape(_redact_absolute_paths(message)) + "</p>",
             "    </section>",
             "    <section aria-labelledby=\"metric-counts\">",
             "      <h2 id=\"metric-counts\">Metric counts</h2>",
@@ -148,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
                 render_error_dashboard(
                     source_name=metrics_path.name,
                     title=title,
-                    message=str(exc),
+                    message=_safe_error_message(exc, metrics_path.name),
                     counts_message=counts_message,
                 ),
                 encoding="utf-8",
@@ -170,6 +171,16 @@ def _error_state_labels(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, OSError):
         return "Input file unavailable", "No counts were rendered from unavailable data."
     return "Metrics format error", "No counts were rendered from invalid data."
+
+
+def _safe_error_message(exc: BaseException, source_name: str) -> str:
+    if isinstance(exc, FileNotFoundError):
+        return f"Metrics file is unavailable: {source_name}"
+    return _redact_absolute_paths(str(exc))
+
+
+def _redact_absolute_paths(message: str) -> str:
+    return re.sub(r"(?<![\w.-])/(?:[^/\s'\":<>]+/)*([^/\s'\":<>]+)", r"<path:\1>", message)
 
 
 def _extract_counts(metrics: dict[str, Any]) -> dict[str, Any]:
@@ -390,20 +401,16 @@ def _render_runs(metrics: dict[str, Any]) -> str:
             rows.append(
                 "          <tr>"
                 f"<th scope=\"row\">Run {index}</th>"
-                f"<td>{_escape(str(run))}</td><td>unknown</td>"
+                f"<td>{_escape(str(run))}</td>"
                 "</tr>"
             )
             continue
         run_id = run.get("id") or run.get("run_id") or f"Run {index}"
         status = run.get("status") or run.get("outcome") or "unknown"
-        raw_counts = run.get("counts")
-        run_counts: dict[str, Any] = raw_counts if isinstance(raw_counts, dict) else run
-        processed = _metric_value(run_counts, "processed", ("total_processed",))
         rows.append(
             "          <tr>"
             f"<th scope=\"row\">{_escape(str(run_id))}</th>"
             f"<td>{_escape(str(status))}</td>"
-            f"<td>{'missing' if processed is None else _escape(str(processed))}</td>"
             "</tr>"
         )
     return (
@@ -411,7 +418,7 @@ def _render_runs(metrics: dict[str, Any]) -> str:
         "      <h2 id=\"run-summary\">Run summary</h2>\n"
         "      <table>\n"
         "        <caption>Run-level status remains visible for failed or partial runs.</caption>\n"
-        "        <thead><tr><th scope=\"col\">Run</th><th scope=\"col\">Status</th><th scope=\"col\">Processed</th></tr></thead>\n"
+        "        <thead><tr><th scope=\"col\">Run</th><th scope=\"col\">Status</th></tr></thead>\n"
         "        <tbody>\n"
         + "\n".join(rows)
         + "\n        </tbody>\n"
