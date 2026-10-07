@@ -890,7 +890,11 @@ def _weak_evidence_reasons(idea):
     proof = idea.get("proof_point", "")
     if not proof_grounding["source_paths"] or len(_content_tokens(proof)) < 6:
         return ["weak_proof_point"]
-    source_terms = _content_concrete_terms(" ".join(str(v) for v in idea.get("source_material", {}).values()))
+    source_material = idea.get("source_material", {})
+    source_terms = _content_concrete_terms(" ".join(
+        str(source_material.get(key, ""))
+        for key in ("insight", "action", "source_url", "source_author", "source_section", "project_bucket")
+    ))
     proof_terms = _content_concrete_terms(proof)
     if proof_terms and source_terms and len(proof_terms & source_terms) == 0:
         return ["proof_not_traceable_to_source_material"]
@@ -1028,7 +1032,7 @@ def _load_prior_content_ideas(prior_manifest=None, prior_manifest_path=None):
     if prior_manifest_path:
         try:
             loaded = json.loads(Path(prior_manifest_path).read_text())
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None, "manifest_unavailable"
         if isinstance(loaded, dict) and isinstance(loaded.get("ideas"), list):
             return loaded["ideas"], None
