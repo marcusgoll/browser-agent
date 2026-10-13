@@ -633,12 +633,12 @@ def render_opportunity_memo(routed, today):
     if not project_routes:
         lines.append("- None")
     for index, route in enumerate(project_routes, 1):
-        lines.append(f"{index}. primary: {route.get('project')} route_score={route.get('route_score', 0)} @{route.get('author', 'Unknown')}")
+        lines.append(f"{index}. primary: {route['project']} route_score={route['route_score']} @{route['author']}")
         lines.append(f"   - route: {route.get('route_why', '')}")
         if route.get('opportunity_why'):
             lines.append(f"   - opportunity: {route.get('opportunity_why', '')}")
         for secondary in route.get('secondary_routes') or []:
-            lines.append(f"   - secondary: {secondary.get('project')} score={secondary.get('score', 0)}")
+            lines.append(f"   - secondary: {secondary['project']} score={secondary['score']}")
             lines.append(f"     - why: {secondary.get('why', '')}")
         lines.append(f"   - source: {route.get('url', '')}")
     lines.append("")

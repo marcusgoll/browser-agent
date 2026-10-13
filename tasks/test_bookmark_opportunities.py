@@ -296,5 +296,12 @@ class OpportunityRouterTests(unittest.TestCase):
                 self.assertIn("- None", memo)
 
 
+    def test_opportunity_memo_rejects_broken_internal_route(self):
+        routed = feed.build_opportunity_router(self.sample_summary(), self.sample_analysis())
+        del routed["project_routes"][0]["project"]
+        with self.assertRaises(KeyError):
+            feed.render_opportunity_memo(routed, "2026-10-13")
+
+
 if __name__ == "__main__":
     unittest.main()
