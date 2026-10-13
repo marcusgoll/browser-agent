@@ -190,7 +190,7 @@ def _opportunity_by_url(routed):
     return opportunities
 
 
-def build_project_routes(summary, analysis, opportunity_by_url=None, limit=20):
+def build_project_routes(summary, analysis, opportunity_by_url=None):
     """Assign optional fixed project buckets without changing opportunity sections."""
     records = _analysis_by_url(analysis)
     actions_by_url = {item.get('url'): item.get('action', '') for item in summary.get('action_items', []) if item.get('url')}
@@ -240,7 +240,7 @@ def build_project_routes(summary, analysis, opportunity_by_url=None, limit=20):
     return sorted(
         routes,
         key=lambda item: (-item['opportunity_score'], -item['route_score'], item['url']),
-    )[:limit]
+    )[:20]
 
 
 def _section_item(author, insight, action, url, record, section):
