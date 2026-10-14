@@ -19,6 +19,9 @@ services:
       - BOOKMARK_VIDEO_TRANSCRIBE_MAX_SECONDS=${BOOKMARK_VIDEO_TRANSCRIBE_MAX_SECONDS:-120}
       - BOOKMARK_VIDEO_TRANSCRIBE_PROVIDER=${BOOKMARK_VIDEO_TRANSCRIBE_PROVIDER:-openrouter}
       - BOOKMARK_VIDEO_TRANSCRIBE_MODEL=${BOOKMARK_VIDEO_TRANSCRIBE_MODEL:-openrouter/anthropic/claude-sonnet-4}
+      # Local content-idea/v1 output can be rolled back independently of note/routing output.
+      - CONTENT_IDEA_GENERATION_ENABLED=${CONTENT_IDEA_GENERATION_ENABLED:-1}
+      - CONTENT_IDEA_PRIOR_MANIFEST=${CONTENT_IDEA_PRIOR_MANIFEST:-}
       # Required only for approved X bookmark move/delete execution.
       - X_BEARER_TOKEN=${X_BEARER_TOKEN:-}
       # Connect to existing browserless/chrome container on homelab
@@ -32,8 +35,6 @@ services:
       - ./README.md:/app/README.md:ro
     networks:
       - browser-agent-network
-      # Optionally attach to social-media-agent network to reach its Chrome
-      - social-media-agent_social-agent-network
     restart: "no"
     # Run once and exit; use `docker compose run` for tasks
     entrypoint: ["python3"]
@@ -42,5 +43,3 @@ services:
 networks:
   browser-agent-network:
     driver: bridge
-  social-media-agent_social-agent-network:
-    external: true
