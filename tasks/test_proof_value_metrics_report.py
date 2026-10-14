@@ -112,6 +112,19 @@ class ProofValueMetricsReportTests(unittest.TestCase):
             self.assertIn("<dt>Cache hits</dt>", html)
             self.assertIn("<dd>2</dd>", html)
 
+    def test_unreadable_metrics_writes_failure_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            result = report.write_report(root, root / "failure.html")
+            self.assertFalse(result.ok)
+            self.assertIn("Unreadable metrics JSON", result.path.read_text())
+
+    def test_missing_default_names_every_search_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = report._write_missing_default_report(Path(tmpdir) / "report.html")
+            for directory in report.DEFAULT_METRICS_DIRS:
+                self.assertIn(str(directory), result.message)
+
     def test_missing_metrics_json_writes_visible_failure_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

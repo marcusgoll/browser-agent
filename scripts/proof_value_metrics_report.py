@@ -127,31 +127,16 @@ def write_report(metrics_path: Path, output_path: Path) -> ReportResult:
     source_name = metrics_path.name
     try:
         html_report = render_report(load_metrics(metrics_path), source_name=source_name)
-    except FileNotFoundError:
-        message = f"missing metrics JSON: {metrics_path}"
-        html_report = render_failure_report(
-            heading="Missing metrics JSON",
-            message=message,
-            source_name=source_name,
-        )
-        output_path.write_text(html_report, encoding="utf-8")
-        return ReportResult(output_path, False, message)
-    except json.JSONDecodeError as exc:
-        message = f"invalid metrics JSON: {metrics_path} ({exc.msg})"
-        html_report = render_failure_report(
-            heading="Invalid metrics JSON",
-            message=message,
-            source_name=source_name,
-        )
-        output_path.write_text(html_report, encoding="utf-8")
-        return ReportResult(output_path, False, message)
-    except ValueError as exc:
-        message = f"invalid metrics JSON: {metrics_path} ({exc})"
-        html_report = render_failure_report(
-            heading="Invalid metrics JSON",
-            message=message,
-            source_name=source_name,
-        )
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, FileNotFoundError):
+            kind = "missing"
+        elif isinstance(exc, OSError):
+            kind = "unreadable"
+        else:
+            kind = "invalid"
+        heading = f"{kind.capitalize()} metrics JSON"
+        message = f"{kind} metrics JSON: {metrics_path} ({exc})"
+        html_report = render_failure_report(heading=heading, message=message, source_name=source_name)
         output_path.write_text(html_report, encoding="utf-8")
         return ReportResult(output_path, False, message)
 
@@ -192,13 +177,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _write_missing_default_report(output_path: Path) -> ReportResult:
-    message = "missing metrics JSON: no proof_value_metrics_*.json file found in output/opportunities"
+    searched = ", ".join(str(directory / "proof_value_metrics_*.json") for directory in DEFAULT_METRICS_DIRS)
+    message = f"missing metrics JSON: no file found in {searched}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         render_failure_report(
             heading="Missing metrics JSON",
             message=message,
-            source_name="output/opportunities/proof_value_metrics_*.json",
+            source_name=searched,
         ),
         encoding="utf-8",
     )
