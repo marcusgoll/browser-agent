@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -111,6 +112,22 @@ class ProofValueMetricsReportTests(unittest.TestCase):
             self.assertIn("Proof-of-Value Metrics", html)
             self.assertIn("<dt>Cache hits</dt>", html)
             self.assertIn("<dd>2</dd>", html)
+
+    def test_output_aliases_cannot_overwrite_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            metrics = root / "metrics.json"
+            original = json.dumps(self.sample_metrics())
+            metrics.write_text(original)
+            symlink = root / "symlink.html"
+            symlink.symlink_to(metrics)
+            hardlink = root / "hardlink.html"
+            os.link(metrics, hardlink)
+            for output in (metrics, symlink, hardlink):
+                with self.subTest(output=output.name):
+                    with self.assertRaisesRegex(ValueError, "must differ"):
+                        report.write_report(metrics, output)
+                    self.assertEqual(metrics.read_text(), original)
 
     def test_unreadable_metrics_writes_failure_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

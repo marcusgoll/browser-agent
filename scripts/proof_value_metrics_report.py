@@ -123,6 +123,8 @@ def load_metrics(path: Path) -> dict[str, Any]:
 
 def write_report(metrics_path: Path, output_path: Path) -> ReportResult:
     """Read metrics_path and write a local static HTML report to output_path."""
+    if metrics_path.exists() and output_path.exists() and metrics_path.samefile(output_path):
+        raise ValueError("metrics input and report output must differ")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     source_name = metrics_path.name
     try:
