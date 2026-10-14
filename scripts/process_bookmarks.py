@@ -42,7 +42,8 @@ PROFILE_DIR = os.environ.get("BROWSER_PROFILE_DIR", "/app/profiles")
 OUTPUT_DIR = Path("/app/output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 BOOKMARK_ANALYSIS_CACHE_FILE = OUTPUT_DIR / "bookmark_analysis_cache_v1.json"
-BOOKMARK_ANALYSIS_CACHE_VERSION = "bookmark-analysis-cache-v1"
+BOOKMARK_ANALYSIS_CACHE_VERSION = "bookmark-analysis-cache-v2"
+BOOKMARK_ANALYSIS_POLICY_VERSION = "bookmark-analysis-policy-v1"
 FETCH_TIMEOUT_SECONDS = int(os.environ.get("BOOKMARK_LINK_FETCH_TIMEOUT", "8"))
 FETCH_MAX_BYTES = int(os.environ.get("BOOKMARK_LINK_FETCH_MAX_BYTES", str(1024 * 1024)))
 FETCH_SNIPPET_CHARS = int(os.environ.get("BOOKMARK_LINK_SNIPPET_CHARS", "2500"))
@@ -510,9 +511,7 @@ TRACKING_QUERY_KEYS = {
     'gclid',
     'mc_cid',
     'mc_eid',
-    'ref',
     'ref_src',
-    's',
 }
 
 
@@ -611,11 +610,97 @@ def _cache_analysis_payload(result):
     }
 
 
+def _cache_result_payload(result):
+    return {
+        key: value
+        for key, value in (result or {}).items()
+        if key not in ('cache_status', 'cache_key')
+    }
+
+
+def _bookmark_analysis_policy_signature():
+    provider = _env_first(
+        "LLM_PROVIDER",
+        "HERMES_LLM_PROVIDER",
+        "HERMES_PROVIDER",
+        "HERMES_MODEL_PROVIDER",
+        default="openrouter",
+    ).lower()
+    default_model = {
+        "openrouter": "anthropic/claude-sonnet-4",
+        "anthropic": "claude-sonnet-4",
+        "openai": "gpt-4o-mini",
+        "custom": "gpt-4o-mini",
+        "openai-compatible": "gpt-4o-mini",
+        "endpoint": "gpt-4o-mini",
+    }.get(provider, "anthropic/claude-sonnet-4")
+    return {
+        'policy_version': os.environ.get('BOOKMARK_ANALYSIS_POLICY_VERSION', BOOKMARK_ANALYSIS_POLICY_VERSION),
+        'provider': provider,
+        'model': _env_first("LLM_MODEL", "HERMES_LLM_MODEL", "HERMES_MODEL", default=default_model),
+        'temperature': _env_first("LLM_TEMPERATURE", "HERMES_LLM_TEMPERATURE", default="0.3"),
+        'enrichment': {
+            'fetch_timeout_seconds': FETCH_TIMEOUT_SECONDS,
+            'fetch_max_bytes': FETCH_MAX_BYTES,
+            'fetch_snippet_chars': FETCH_SNIPPET_CHARS,
+            'max_enriched_links': MAX_ENRICHED_LINKS_PER_BOOKMARK,
+            'video_transcription_enabled': VIDEO_TRANSCRIPTION_ENABLED,
+            'video_fetch_timeout_seconds': VIDEO_FETCH_TIMEOUT_SECONDS,
+            'video_fetch_max_bytes': VIDEO_FETCH_MAX_BYTES,
+            'video_transcribe_max_seconds': VIDEO_TRANSCRIBE_MAX_SECONDS,
+            'video_transcribe_provider': VIDEO_TRANSCRIBE_PROVIDER,
+            'video_transcribe_model': VIDEO_TRANSCRIBE_MODEL,
+        },
+    }
+
+
+def bookmark_analysis_signature(bookmark, cache_key=None):
+    """Hash the inputs that make a cached bookmark analysis reusable."""
+    return _stable_hash({
+        'cache_version': BOOKMARK_ANALYSIS_CACHE_VERSION,
+        'cache_key': cache_key or bookmark_dedupe_key(bookmark),
+        'content_hash': bookmark_content_hash(bookmark),
+        'policy': _bookmark_analysis_policy_signature(),
+    })
+
+
+def _fresh_bookmark_analysis_cache(load_error=None):
+    cache = {'version': BOOKMARK_ANALYSIS_CACHE_VERSION, 'entries': {}}
+    if load_error:
+        cache['load_error'] = load_error
+    return cache
+
+
+def _prepare_bookmark_analysis_cache(cache):
+    """Validate cache shape/version without silently reusing stale entries."""
+    if not isinstance(cache, dict):
+        return _fresh_bookmark_analysis_cache('invalid cache shape')
+
+    version = cache.get('version')
+    if version not in (None, BOOKMARK_ANALYSIS_CACHE_VERSION):
+        cache.clear()
+        cache.update(_fresh_bookmark_analysis_cache(
+            f'cache version mismatch: {version} != {BOOKMARK_ANALYSIS_CACHE_VERSION}'
+        ))
+        return cache
+
+    entries = cache.get('entries')
+    if entries is None:
+        cache['entries'] = {}
+    elif not isinstance(entries, dict):
+        cache.clear()
+        cache.update(_fresh_bookmark_analysis_cache('invalid cache entries shape'))
+        return cache
+
+    cache['version'] = BOOKMARK_ANALYSIS_CACHE_VERSION
+    cache.pop('load_error', None)
+    return cache
+
+
 async def analyze_bookmarks_with_cache(bookmarks, analyze_func, cache=None):
     """Deduplicate same-run inputs and reuse cached analysis across repeated runs."""
-    cache = cache if cache is not None else {}
-    cache['version'] = BOOKMARK_ANALYSIS_CACHE_VERSION
-    entries = cache.setdefault('entries', {})
+    cache = _prepare_bookmark_analysis_cache(cache if cache is not None else {})
+    entries = cache['entries']
     stats = {'hits': 0, 'misses': 0, 'duplicates_suppressed': 0}
     duplicates = []
     results = []
@@ -634,10 +719,15 @@ async def analyze_bookmarks_with_cache(bookmarks, analyze_func, cache=None):
             continue
         seen[key] = index
 
+        signature = bookmark_analysis_signature(bookmark, key)
         cached = entries.get(key)
-        if cached and isinstance(cached.get('analysis'), dict):
+        if (
+            cached
+            and cached.get('analysis_signature') == signature
+            and isinstance(cached.get('result'), dict)
+        ):
             stats['hits'] += 1
-            result = {**bookmark, **cached['analysis']}
+            result = {**cached['result'], **bookmark}
             result['cache_status'] = 'hit'
             result['cache_key'] = key
             results.append(result)
@@ -650,6 +740,8 @@ async def analyze_bookmarks_with_cache(bookmarks, analyze_func, cache=None):
         result['cache_key'] = key
         entries[key] = {
             'analysis': _cache_analysis_payload(result),
+            'result': _cache_result_payload(result),
+            'analysis_signature': signature,
             'cached_at': datetime.now().isoformat(),
             'source_url': bookmark.get('url') or '',
             'content_hash': bookmark_content_hash(bookmark),
@@ -664,13 +756,10 @@ def load_bookmark_analysis_cache(path=BOOKMARK_ANALYSIS_CACHE_FILE):
         with open(path) as f:
             cache = json.load(f)
     except FileNotFoundError:
-        return {'version': BOOKMARK_ANALYSIS_CACHE_VERSION, 'entries': {}}
+        return _fresh_bookmark_analysis_cache()
     except Exception as exc:
-        return {'version': BOOKMARK_ANALYSIS_CACHE_VERSION, 'entries': {}, 'load_error': str(exc)[:300]}
-    if not isinstance(cache, dict) or not isinstance(cache.get('entries'), dict):
-        return {'version': BOOKMARK_ANALYSIS_CACHE_VERSION, 'entries': {}, 'load_error': 'invalid cache shape'}
-    cache['version'] = BOOKMARK_ANALYSIS_CACHE_VERSION
-    return cache
+        return _fresh_bookmark_analysis_cache(str(exc)[:300])
+    return _prepare_bookmark_analysis_cache(cache)
 
 
 def save_bookmark_analysis_cache(cache, path=BOOKMARK_ANALYSIS_CACHE_FILE):
